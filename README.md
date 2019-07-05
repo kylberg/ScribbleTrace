@@ -1,1 +1,3 @@
 # ScribbleTrace
+
+## Background and inspiration
