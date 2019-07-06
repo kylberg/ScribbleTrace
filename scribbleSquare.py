@@ -8,7 +8,7 @@ import random
 img = skimage.data.load('P:/projects/AxiDraw/kylberg/wiggly_squares/pipe.jpg',as_gray=True)
 
 
-output_width = 10.0
+output_width = 20.0
 quantificationlevels = 7
 scale_factor = round(img.shape[0]/output_width)
 
