@@ -15,3 +15,10 @@ The Polagraph control software implements several interesting strategies of half
 I like the idea of replacing pixels with patterns and I believe it all started with noticing halftoneing in print. Another moment of inspiration was during my PhD when a colleague wrote a software converting a bitmap into picture of an embroidery with cross stitches. Among the tracing styles on the Polargraph software there is one called Norwegian pixels that like and suddenly I stumbeled upon an excellent small software caled Zebra Trace by Maxim Barabash (https://github.com/maxim-s-barabash/ZebraTrace/). 
 
 These moments of inspiration combined led me to create this repository. 
+
+## Preliminary results
+
+### Scribble squares
+
+The first test of the scribble squares style:
+![Screenshot](https://github.com/kylberg/ScribbleTrace/blob/personal/kylberg/PoC-scribble-squares/scribbleSquares-PoC.png)
