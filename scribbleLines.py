@@ -5,11 +5,12 @@ from skimage.transform import resize
 import random
 
 
-img = skimage.data.load('P:/projects/AxiDraw/kylberg/wiggly_squares/pipe.jpg',as_gray=True)
+img = skimage.data.load('C:/Users/GustafK/source/repos/github/kylberg/ScribbleTrace/MagrittePipe.jpg',as_gray=True)
 
 
-output_width = 30.0
-quantificationlevels = 10
+output_width = 40.0
+quantificationlevels = 4
+
 scale_factor = round(img.shape[0]/output_width)
 
 img = resize(img,(round(img.shape[0]/scale_factor), round(img.shape[1]/scale_factor)),anti_aliasing=True)
@@ -39,19 +40,18 @@ def pixplot():
     # pixel_sizes = np.multiply(np.linspace(min_pixel_size,max_pixel_size,quantificationlevels),np.random.uniform(1-randomness_position,1+randomness_position,quantificationlevels))
     # pixel_sizes = pixel_sizes[0:val]
     # for n in pixel_sizes:
-
+    
+    # number of lines by the intensiy after quantization
     for n in range(val): #range(np.int(np.maximum(grad_mag*10,1)))
 
+    # scale length by gradint magnitude 
         vert_x = np.multiply(np.array([-0.5, 0.5]),np.maximum(grad_mag*10,0.1))
-
         vert_x = np.multiply(vert_x,np.random.uniform(1-randomness_length,1+randomness_length,1))
-
         vert_y = np.array([0, 0])
 
-        vert_x = vert_x + np.random.uniform(-randomness_vertex,randomness_vertex,2)
         vert_y = vert_y + np.random.uniform(-randomness_vertex,randomness_vertex,2)
-
-
+        vert_x = vert_x + np.random.uniform(-randomness_vertex,randomness_vertex,2)
+        # rotate line by gradient direction so that line is perpendicular to gradients
         p1 = rotate_origin([vert_x[0],vert_y[0]],alpha)
         p2 = rotate_origin([vert_x[1],vert_y[1]],alpha)
 
