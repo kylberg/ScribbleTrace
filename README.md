@@ -14,7 +14,6 @@ The aim with this repo is to design a few algorithms for tracing bitmaps into pa
 
 ## Preliminary results
 
-The first test of the scribble squares style:
 ![Screenshot](https://github.com/kylberg/ScribbleTrace/blob/personal/kylberg/PoC-scribble-squares/examples.png)
 
 __Top left__ Original image. __Top right__ gray scale, quantized and downsampled version. __Middle left__ The _scribble squares_ style, drawing squares from outside in.  __Middle right__ The _scribble squares_ style, drawing squares from inside out. __Bottom left__ The _scribble lines_ style with straight lines along gradients.  __Bottom right__ The _Scribble curves_ style, drawing short Bezier curves along gradients.
