@@ -141,7 +141,9 @@ def pixplot():
         plt.plot(vert_x,vert_y,'k-')
 
 
-plt.imshow(grad_mag,alpha = 0.5, cmap = 'gray')
+img_angular = np.arctan2(img_dy,img_dx)
+plt.imshow(grad_mag,alpha = 0.5, cmap = 'viridis')
+plt.quiver(img_dx,img_dy)
 
 height, width = img.shape
 for c in range(width):
