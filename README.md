@@ -2,7 +2,7 @@
 
 _The repository is in a very early prototyping stage._
 
-The aim with this repo is to design a few algorithms for tracing bitmaps into patterns reflecting intensities that can be exported as svg to be used with e.g. pen plotters. If time allows a GUI in pyqt5 might be added for increased usability.
+The aim with this repo is to design a few algorithms for tracing bitmaps into patterns reflecting intensities that can be exported as __svg__ to be used with e.g. pen plotters. If time allows a GUI in pyqt5 might be added for increased usability.
 
 ## Planned tracing styles
 
