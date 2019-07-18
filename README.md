@@ -7,6 +7,8 @@ The aim with this repo is to design a few algorithms for tracing bitmaps into pa
 ## Planned tracing styles
 
 * Scribble squares
+* Scribble circles
+* Connected scribble spirals
 * Scribble lines
 * Scribble curves
 * Continious scribble curve
