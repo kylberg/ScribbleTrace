@@ -19,7 +19,7 @@ spiral_b = 1
 min_pixel_size = 0.1
 max_pixel_size = 1.0
 
-small_first = True
+normalize_spirals = True
 
 scale_factor = round(img.shape[0]/output_width)
 
@@ -27,8 +27,21 @@ scale_factor = round(img.shape[0]/output_width)
 img = resize(img,(round(img.shape[0]/scale_factor), round(img.shape[1]/scale_factor)),anti_aliasing=True)
 img_orig = img
 img = 1-img
-img = np.round(np.multiply(img,quantificationlevels - 1)) +1
+img = np.round(np.multiply(img,quantificationlevels - 1)) + 0
 
+
+def vertices_on_sin():
+
+    n_vertices = round(spiral_theta_resolution)
+
+    thetas = np.linspace(0,2*np.pi,n_vertices)
+    y = np.sin(thetas)
+
+    y = np.multiply(y,0.1)
+
+    vertices = np.transpose(np.vstack((np.linspace(-0.5,0.5,n_vertices),y)))
+
+    return vertices
 
 def vertices_on_archimedian_spiral(theta_range):
 
@@ -46,8 +59,7 @@ def vertices_on_archimedian_spiral(theta_range):
             radius = spiral_a + spiral_b*(-theta)
             vertices[idx,:] = np.array([-radius*np.cos(-theta), -radius*np.sin(-theta)])
         
-    vertices_max = np.max(vertices)
-    vertices = np.multiply(np.divide(vertices,vertices_max),0.5)
+    
 
     return vertices
 
@@ -67,12 +79,40 @@ def pixplot():
         # circle1 = plt.Circle([c,r],radius=n/2,facecolor='none',edgecolor='k')
         # ax.add_artist(circle1)
         
-    theta_range = val * np.pi
-    vert = vertices_on_archimedian_spiral(theta_range)
+    if val > 0:    
+        theta_range  = val * np.pi
+        vert = vertices_on_archimedian_spiral(theta_range)
 
-    vert[:,0] = vert[:,0] + c 
-    vert[:,1] = vert[:,1] + r
-    plt.plot(vert[:,0],vert[:,1],'k-')
+
+        if normalize_spirals:
+            vert_max = np.max(vert)
+        else:
+            vert_max = 22
+        
+        vert = np.multiply(np.divide(vert,vert_max),0.5)
+
+
+        vert[:,0] = vert[:,0] + c 
+        vert[:,1] = vert[:,1] + r
+
+        
+        plt.plot(np.array([np.min(vert[:,0]),c-0.5]),np.array([r    ,r]),'k')
+        plt.plot(vert[:,0],vert[:,1],'k-')
+        plt.plot(np.array([np.max(vert[:,0]),0.5+c]),np.array([r,r]),'k')
+    else:
+        vert = vertices_on_sin()
+
+        # vert_max = np.max(vert)
+
+        
+        # vert = np.divide(vert,vert_max)
+
+        vert[:,0] = vert[:,0] + c 
+        vert[:,1] = vert[:,1] + r
+        plt.plot(vert[:,0],vert[:,1],'k-')
+
+        # plt.plot(np.array([c-0.5,c+0.5]),np.array([r,r]),'k')
+
         # vert_x = np.array([0, 0, 1, 1])
         # vert_y = np.array([0, 1, 1, 0])
 
