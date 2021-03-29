@@ -1,12 +1,12 @@
 import numpy as np
 from matplotlib import pyplot as plt
 import skimage
+from skimage import filters, data, io
 from skimage.transform import resize
 import random
 
-
-img = skimage.data.load('C:/Users/GustafK/source/repos/github/kylberg/ScribbleTrace/MagrittePipe.jpg',as_gray=True)
-
+img = io.imread('C:/path/to/your/file.jpg',as_gray=True)
+#img = skimage.data.camera()
 
 output_width = 40.0
 quantificationlevels = 4
@@ -68,11 +68,14 @@ plt.imshow(img_orig,alpha = 0.5, cmap = 'gray')
 height, width = img.shape
 for c in range(width):
     for r in range(height):
-        val = np.int(img[r,c])
+        val = int(img[r,c])
         grad_direction = np.array([img_dx[r,c],img_dy[r,c]]) 
         alpha = np.arctan2(grad_direction[0],grad_direction[1])
         grad_mag = grad_direction[0]*grad_direction[0] + grad_direction[1]*grad_direction[1]
         pixplot()
+plt.axis('off') 
+plt.gcf().patch.set_visible(False)      
+plt.savefig("test.svg", bbox_inches ="tight")
 plt.show()
 
 
