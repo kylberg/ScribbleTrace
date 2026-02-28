@@ -18,6 +18,23 @@ import svgwrite
 from svgwrite.path import Path as SvgPath
 
 
+# Algorithm constants
+HATCH_TRACE_MULTIPLIER = 3  # Multiplier for hatch line trace length
+HATCH_STEP_SIZE = 0.1  # Step size for hatch line tracing
+
+SPIRAL_MIN_POINTS = 20  # Minimum points in a spiral
+SPIRAL_POINTS_PER_TURN = 10  # Points per spiral turn
+SPIRAL_INITIAL_RADIUS = 0.01  # Initial radius 'a' in r = a + b*theta
+SPIRAL_PIXEL_SCALE = 0.45  # Scale factor to fit spiral within pixel
+
+STIPPLE_JITTER = 0.4  # Position randomization for stipple dots
+STIPPLE_CIRCLE_SEGMENTS = 16  # Number of segments in each stipple circle
+
+LINE_MIN_LENGTH = 0.3  # Minimum line length in scribble lines mode
+LINE_MAX_LENGTH = 1.0  # Maximum line length in scribble lines mode
+LINE_GRADIENT_SCALE = 5.0  # Scale factor for gradient magnitude
+
+
 class ImageToVector:
     """Base class for converting images to vector paths"""
     
@@ -236,8 +253,8 @@ class HatchRenderer(ImageToVector):
         current_segment = []
         
         # Trace along the line
-        max_steps = int(np.sqrt(self.width**2 + self.height**2) * 3)
-        step_size = 0.1
+        max_steps = int(np.sqrt(self.width**2 + self.height**2) * HATCH_TRACE_MULTIPLIER)
+        step_size = HATCH_STEP_SIZE
         
         for step in range(-max_steps // 2, max_steps // 2):
             x = start_x + dx * step * step_size
@@ -323,15 +340,15 @@ class SpiralRenderer(ImageToVector):
             tightness: How tight the spiral is
         """
         max_theta = turns * np.pi
-        num_points = max(20, turns * 10)
+        num_points = max(SPIRAL_MIN_POINTS, turns * SPIRAL_POINTS_PER_TURN)
         
         thetas = np.linspace(0, max_theta, num_points)
         
-        # Archimedean spiral: r = a + b*theta
-        a = 0.01
-        b = tightness
+        # Archimedean spiral equation: r = a + b*theta
+        spiral_initial_radius = SPIRAL_INITIAL_RADIUS
+        spiral_growth_rate = tightness
         
-        r = a + b * thetas
+        r = spiral_initial_radius + spiral_growth_rate * thetas
         
         # Convert to Cartesian
         x = cx + r * np.cos(thetas)
@@ -340,7 +357,7 @@ class SpiralRenderer(ImageToVector):
         # Normalize to fit within pixel
         max_r = np.max(r)
         if max_r > 0:
-            scale = 0.45 / max_r
+            scale = SPIRAL_PIXEL_SCALE / max_r
             x = cx + (x - cx) * scale
             y = cy + (y - cy) * scale
         
@@ -385,8 +402,8 @@ class StipplingRenderer(ImageToVector):
                 
                 for _ in range(num_dots):
                     # Random position within pixel
-                    x = c + np.random.uniform(-0.4, 0.4)
-                    y = r + np.random.uniform(-0.4, 0.4)
+                    x = c + np.random.uniform(-STIPPLE_JITTER, STIPPLE_JITTER)
+                    y = r + np.random.uniform(-STIPPLE_JITTER, STIPPLE_JITTER)
                     
                     # Create small circle path
                     circle_points = self._create_circle(x, y, self.dot_size)
@@ -396,7 +413,7 @@ class StipplingRenderer(ImageToVector):
     
     def _create_circle(self, cx: float, cy: float, radius: float) -> np.ndarray:
         """Create a circle path"""
-        num_points = 16
+        num_points = STIPPLE_CIRCLE_SEGMENTS
         angles = np.linspace(0, 2 * np.pi, num_points + 1)
         
         x = cx + radius * np.cos(angles)
@@ -436,7 +453,7 @@ class ScribbleLinesRenderer(ImageToVector):
                     angle = np.arctan2(grad_y, grad_x) + np.pi / 2
                     
                     # Line length based on gradient magnitude
-                    length = max(0.3, min(1.0, self.grad_mag[r, c] * 5))
+                    length = max(LINE_MIN_LENGTH, min(LINE_MAX_LENGTH, self.grad_mag[r, c] * LINE_GRADIENT_SCALE))
                     
                     # Add randomness
                     angle += np.random.uniform(-self.randomness, self.randomness)
