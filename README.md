@@ -1,6 +1,10 @@
 # ScribbleTrace
 
-_The repository is in a very early prototyping stage._
+_**Note:** This repository now includes a modern Python 3.12+ implementation! See [MODERN_README.md](MODERN_README.md) for the updated version with hatch shading, stippling, and smooth SVG output optimized for AxiDraw pen plotters._
+
+---
+
+_The original prototype repository is preserved below and in the `src/` directory._
 
 The aim with this repo is to design a few algorithms for tracing bitmaps into patterns reflecting intensities that can be exported as __svg__ to be used with e.g. pen plotters. If time allows a GUI in pyqt5 might be added for increased usability.
 
