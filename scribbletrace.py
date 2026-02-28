@@ -129,7 +129,7 @@ class ImageToVector:
 
 
 class HatchRenderer(ImageToVector):
-    """Render image using parallel hatch lines"""
+    """Render image using parallel hatch lines with variable density"""
     
     def __init__(
         self,
@@ -138,7 +138,8 @@ class HatchRenderer(ImageToVector):
         quantization_levels: int = 8,
         hatch_angle: float = 45.0,
         line_spacing: float = 0.5,
-        cross_hatch: bool = True
+        cross_hatch: bool = True,
+        variable_density: bool = True
     ):
         """
         Initialize hatch renderer
@@ -148,13 +149,15 @@ class HatchRenderer(ImageToVector):
             output_width: Output width in units
             quantization_levels: Number of intensity levels
             hatch_angle: Angle of hatch lines in degrees (default: 45)
-            line_spacing: Spacing between hatch lines (default: 0.5)
+            line_spacing: Base spacing between hatch lines (default: 0.5)
             cross_hatch: Enable cross-hatching for darker areas (default: True)
+            variable_density: Vary hatch density with intensity (default: True)
         """
         super().__init__(image_path, output_width, quantization_levels)
         self.hatch_angle = np.radians(hatch_angle)
         self.line_spacing = line_spacing
         self.cross_hatch = cross_hatch
+        self.variable_density = variable_density
     
     def generate_paths(self) -> list:
         """Generate hatch line paths based on image intensity"""
@@ -264,6 +267,142 @@ class HatchRenderer(ImageToVector):
             segments.append(np.array(current_segment))
         
         return segments
+
+
+class SpiralRenderer(ImageToVector):
+    """Render image using Archimedean spirals"""
+    
+    def __init__(
+        self,
+        image_path: str,
+        output_width: float = 40.0,
+        quantization_levels: int = 7,
+        spiral_tightness: float = 0.05
+    ):
+        """
+        Initialize spiral renderer
+        
+        Args:
+            image_path: Path to input image
+            output_width: Output width in units
+            quantization_levels: Number of intensity levels
+            spiral_tightness: Tightness of spiral (default: 0.05)
+        """
+        super().__init__(image_path, output_width, quantization_levels)
+        self.spiral_tightness = spiral_tightness
+    
+    def generate_paths(self) -> list:
+        """Generate Archimedean spirals with turns based on intensity"""
+        paths = []
+        
+        for r in range(self.height):
+            for c in range(self.width):
+                intensity = self.img_quantized[r, c]
+                
+                if intensity > 0:
+                    spiral_path = self._create_spiral(
+                        c, r, intensity, self.spiral_tightness
+                    )
+                    paths.append(spiral_path)
+        
+        return paths
+    
+    def _create_spiral(
+        self,
+        cx: float,
+        cy: float,
+        turns: int,
+        tightness: float
+    ) -> np.ndarray:
+        """
+        Create an Archimedean spiral path
+        
+        Args:
+            cx, cy: Center position
+            turns: Number of turns (based on intensity)
+            tightness: How tight the spiral is
+        """
+        max_theta = turns * np.pi
+        num_points = max(20, turns * 10)
+        
+        thetas = np.linspace(0, max_theta, num_points)
+        
+        # Archimedean spiral: r = a + b*theta
+        a = 0.01
+        b = tightness
+        
+        r = a + b * thetas
+        
+        # Convert to Cartesian
+        x = cx + r * np.cos(thetas)
+        y = cy + r * np.sin(thetas)
+        
+        # Normalize to fit within pixel
+        max_r = np.max(r)
+        if max_r > 0:
+            scale = 0.45 / max_r
+            x = cx + (x - cx) * scale
+            y = cy + (y - cy) * scale
+        
+        return np.column_stack([x, y])
+
+
+class StipplingRenderer(ImageToVector):
+    """Render image using stippling (dots/small circles)"""
+    
+    def __init__(
+        self,
+        image_path: str,
+        output_width: float = 40.0,
+        quantization_levels: int = 8,
+        dot_size: float = 0.3,
+        density_factor: float = 2.0
+    ):
+        """
+        Initialize stippling renderer
+        
+        Args:
+            image_path: Path to input image
+            output_width: Output width in units
+            quantization_levels: Number of intensity levels
+            dot_size: Size of each stipple dot (default: 0.3)
+            density_factor: Controls dot density (default: 2.0)
+        """
+        super().__init__(image_path, output_width, quantization_levels)
+        self.dot_size = dot_size
+        self.density_factor = density_factor
+    
+    def generate_paths(self) -> list:
+        """Generate stipple dots with density based on image intensity"""
+        paths = []
+        
+        for r in range(self.height):
+            for c in range(self.width):
+                intensity = self.img_quantized[r, c]
+                
+                # Number of dots based on intensity
+                num_dots = int(intensity * self.density_factor)
+                
+                for _ in range(num_dots):
+                    # Random position within pixel
+                    x = c + np.random.uniform(-0.4, 0.4)
+                    y = r + np.random.uniform(-0.4, 0.4)
+                    
+                    # Create small circle path
+                    circle_points = self._create_circle(x, y, self.dot_size)
+                    paths.append(circle_points)
+        
+        return paths
+    
+    def _create_circle(self, cx: float, cy: float, radius: float) -> np.ndarray:
+        """Create a circle path"""
+        num_points = 16
+        angles = np.linspace(0, 2 * np.pi, num_points + 1)
+        
+        x = cx + radius * np.cos(angles)
+        y = cy + radius * np.sin(angles)
+        
+        return np.column_stack([x, y])
 
 
 class ScribbleLinesRenderer(ImageToVector):
@@ -391,7 +530,7 @@ def main():
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['hatch', 'lines', 'curves'],
+        choices=['hatch', 'lines', 'curves', 'stipple', 'spiral'],
         default='hatch',
         help='Rendering mode (default: hatch)'
     )
@@ -451,6 +590,18 @@ def main():
         )
     elif args.mode == 'curves':
         renderer = ScribbleCurvesRenderer(
+            args.input,
+            output_width=args.width,
+            quantization_levels=args.levels
+        )
+    elif args.mode == 'stipple':
+        renderer = StipplingRenderer(
+            args.input,
+            output_width=args.width,
+            quantization_levels=args.levels
+        )
+    elif args.mode == 'spiral':
+        renderer = SpiralRenderer(
             args.input,
             output_width=args.width,
             quantization_levels=args.levels

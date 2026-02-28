@@ -6,9 +6,11 @@ A modern Python tool for converting images to vector drawings optimized for pen 
 
 - ✨ **Modern Python 3.12+** with type hints and clean architecture
 - 🎨 **Multiple Rendering Modes**:
-  - **Hatch**: Parallel and cross-hatch shading based on image intensity
+  - **Hatch**: Parallel and cross-hatch shading based on image intensity (NEW!)
   - **Lines**: Short lines following image gradients
   - **Curves**: Smooth flowing curves following gradients
+  - **Stipple**: Dot-based rendering with variable density (NEW!)
+  - **Spiral**: Archimedean spirals with turns based on intensity (NEW!)
 - 📐 **Clean SVG Output** optimized for pen plotters
 - 🤖 **AxiDraw Compatible** with proper units and formatting
 - 🎯 **Single-Line Vector Paths** for efficient plotting
@@ -31,6 +33,8 @@ python scribbletrace.py input.jpg output.svg
 python scribbletrace.py input.jpg output.svg --mode hatch
 python scribbletrace.py input.jpg output.svg --mode lines
 python scribbletrace.py input.jpg output.svg --mode curves
+python scribbletrace.py input.jpg output.svg --mode stipple
+python scribbletrace.py input.jpg output.svg --mode spiral
 ```
 
 ## Usage Examples
@@ -51,6 +55,28 @@ python scribbletrace.py photo.jpg output.svg \
 - `--hatch-angle`: Angle of primary hatch lines in degrees (default: 45)
 - `--no-cross-hatch`: Disable cross-hatching
 - `--levels`: More levels = more detail in shading (default: 8)
+
+### Stipple Mode (Great for Portraits)
+
+Generate dot-based rendering with variable density:
+
+```bash
+python scribbletrace.py portrait.jpg output.svg \
+  --mode stipple \
+  --width 80 \
+  --levels 6
+```
+
+### Spiral Mode (Unique Artistic Effect)
+
+Generate Archimedean spirals with turns based on image intensity:
+
+```bash
+python scribbletrace.py abstract.jpg output.svg \
+  --mode spiral \
+  --width 50 \
+  --levels 7
+```
 
 ### Lines Mode (Good for Textures)
 
@@ -82,7 +108,7 @@ positional arguments:
   output                Output SVG path
 
 options:
-  --mode {hatch,lines,curves}
+  --mode {hatch,lines,curves,stipple,spiral}
                         Rendering mode (default: hatch)
   --width WIDTH         Output width in arbitrary units (default: 40)
   --levels LEVELS       Quantization levels - higher = more detail (default: 8)
@@ -113,9 +139,11 @@ options:
 ## Tips for Best Results
 
 1. **Choose the right mode**:
-   - Photos/portraits → Hatch mode
+   - Photos/portraits → Hatch or Stipple mode
    - Detailed textures → Lines mode
-   - Artistic/abstract → Curves mode
+   - Artistic/abstract → Curves or Spiral mode
+   - High contrast images → Stipple mode
+   - Organic subjects → Spiral mode
 
 2. **Image preparation**:
    - Use high-contrast images for better results
@@ -142,11 +170,15 @@ options:
 
 ### Algorithm Details
 
-**Hatch Mode**: Generates parallel lines at specified angle, tracing through areas based on image intensity. Cross-hatching adds perpendicular lines in darker regions for richer shading.
+**Hatch Mode**: Generates parallel lines at specified angle, tracing through areas based on image intensity. Cross-hatching adds perpendicular lines in darker regions for richer shading. Lines break at light areas for efficient plotting.
 
 **Lines Mode**: Analyzes image gradients using Sobel filters and draws short lines perpendicular to gradients, with density based on pixel intensity.
 
 **Curves Mode**: Traces smooth curves that flow along image gradients, creating organic, flowing patterns.
+
+**Stipple Mode**: Places variable-density dots with randomized positions within each pixel area. Darker areas receive more dots for a pointillist effect.
+
+**Spiral Mode**: Generates Archimedean spirals where the number of turns is proportional to pixel intensity, creating a unique textured appearance.
 
 ## Original Code
 
