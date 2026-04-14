@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scribbletrace"
+version = "2.0.0"
+description = "Convert images to vector drawings for pen plotters using various artistic algorithms"
+readme = "README.md"
+license = {text = "GPL-3.0-or-later"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Gustaf Kylberg", email = "gustaf@kylberg.org"}
+]
+keywords = ["pen plotter", "axidraw", "vector graphics", "svg", "image processing", "halftone", "hatching"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Artistic Software",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scikit-image>=0.21",
+    "scipy>=1.10",
+    "svgwrite>=1.4",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1",
+]
+
+[project.scripts]
+scribbletrace = "scribbletrace.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kylberg/ScribbleTrace"
+Repository = "https://github.com/kylberg/ScribbleTrace.git"
+Issues = "https://github.com/kylberg/ScribbleTrace/issues"
+
+[tool.setuptools.packages.find]
+include = ["scribbletrace*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
