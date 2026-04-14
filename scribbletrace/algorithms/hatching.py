@@ -452,6 +452,7 @@ class Hatching(Algorithm):
             # Find nearest path start
             min_dist = float("inf")
             min_idx = 0
+            should_reverse = False
 
             for i, path in enumerate(remaining):
                 if path.points:
