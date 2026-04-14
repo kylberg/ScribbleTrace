@@ -7,14 +7,14 @@ for all vectorization algorithms.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
-    from scribbletrace.image_processing import ProcessedImage, GradientData
+    from scribbletrace.image_processing import GradientData, ProcessedImage
     from scribbletrace.svg_output import PathSegment
 
 

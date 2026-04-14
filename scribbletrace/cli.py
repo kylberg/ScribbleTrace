@@ -14,27 +14,26 @@ import sys
 from pathlib import Path
 
 from scribbletrace import (
+    SVGWriter,
+    compute_gradients,
     load_image,
     preprocess,
-    compute_gradients,
-    SVGWriter,
 )
 from scribbletrace.algorithms import (
-    Spirals,
-    SpiralsConfig,
     Circles,
     CirclesConfig,
-    Squares,
-    SquaresConfig,
-    Lines,
-    LinesConfig,
     Curves,
     CurvesConfig,
+    HatchDirection,
     Hatching,
     HatchingConfig,
-    HatchDirection,
+    Lines,
+    LinesConfig,
+    Spirals,
+    SpiralsConfig,
+    Squares,
+    SquaresConfig,
 )
-
 
 ALGORITHMS = {
     "spirals": (Spirals, SpiralsConfig),

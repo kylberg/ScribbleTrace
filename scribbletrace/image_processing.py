@@ -6,15 +6,14 @@ images to prepare them for vectorization algorithms.
 
 from __future__ import annotations
 
-from pathlib import Path
 from dataclasses import dataclass
-from typing import Union
+from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
-from skimage import io, filters
-from skimage.transform import resize
+from skimage import filters, io
 from skimage.color import rgb2gray
+from skimage.transform import resize
 
 
 @dataclass
@@ -55,7 +54,7 @@ class GradientData:
     angle: NDArray[np.float64]
 
 
-def load_image(path: Union[str, Path]) -> NDArray[np.float64]:
+def load_image(path: str | Path) -> NDArray[np.float64]:
     """Load an image from file and convert to grayscale.
 
     Args:

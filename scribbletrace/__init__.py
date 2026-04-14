@@ -23,16 +23,16 @@ Example usage:
     writer.save("output.svg")
 """
 
-from scribbletrace.image_processing import load_image, preprocess, compute_gradients
-from scribbletrace.svg_output import SVGWriter
 from scribbletrace.algorithms import (
-    Spirals,
     Circles,
-    Squares,
-    Lines,
     Curves,
     Hatching,
+    Lines,
+    Spirals,
+    Squares,
 )
+from scribbletrace.image_processing import compute_gradients, load_image, preprocess
+from scribbletrace.svg_output import SVGWriter
 
 __version__ = "2.0.0"
 __author__ = "Gustaf Kylberg"

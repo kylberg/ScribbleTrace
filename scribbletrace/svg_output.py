@@ -6,13 +6,12 @@ optimized for pen plotters like the Axidraw.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Union, Sequence
-from dataclasses import dataclass, field
 
 import svgwrite
 from svgwrite import Drawing
-from svgwrite.path import Path as SVGPath
 
 
 @dataclass
@@ -267,7 +266,7 @@ class SVGWriter:
         self._add_paths_to_drawing(dwg)
         return dwg.tostring()
 
-    def save(self, path: Union[str, Path]) -> None:
+    def save(self, path: str | Path) -> None:
         """Save the SVG to a file.
 
         Args:

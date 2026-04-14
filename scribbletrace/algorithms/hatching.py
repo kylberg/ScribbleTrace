@@ -105,17 +105,6 @@ class Hatching(Algorithm):
         Returns:
             List of PathSegment objects for this hatching direction.
         """
-        cfg = self.config
-        paths = []
-
-        angle_rad = np.radians(direction.value)
-        cos_a = np.cos(angle_rad)
-        sin_a = np.sin(angle_rad)
-
-        # Calculate image diagonal for line coverage
-        diagonal = np.sqrt(self.width**2 + self.height**2)
-        margin = cfg.margin
-
         # Determine line positions based on angle
         # We need to cover the entire image when lines are rotated
 

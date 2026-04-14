@@ -13,12 +13,12 @@ Available algorithms:
 """
 
 from scribbletrace.algorithms.base import Algorithm, AlgorithmConfig
-from scribbletrace.algorithms.spirals import Spirals, SpiralsConfig
 from scribbletrace.algorithms.circles import Circles, CirclesConfig
-from scribbletrace.algorithms.squares import Squares, SquaresConfig
-from scribbletrace.algorithms.lines import Lines, LinesConfig
 from scribbletrace.algorithms.curves import Curves, CurvesConfig
-from scribbletrace.algorithms.hatching import Hatching, HatchingConfig
+from scribbletrace.algorithms.hatching import HatchDirection, Hatching, HatchingConfig
+from scribbletrace.algorithms.lines import Lines, LinesConfig
+from scribbletrace.algorithms.spirals import Spirals, SpiralsConfig
+from scribbletrace.algorithms.squares import Squares, SquaresConfig
 
 __all__ = [
     "Algorithm",
@@ -35,4 +35,5 @@ __all__ = [
     "CurvesConfig",
     "Hatching",
     "HatchingConfig",
+    "HatchDirection",
 ]
