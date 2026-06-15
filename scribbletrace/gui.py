@@ -57,6 +57,14 @@ PIPELINE_LABEL_TO_INDEX = {label: idx for idx, label in enumerate(PIPELINE_STEP_
 
 HUB_THEME_ID = "Nymbo/Nymbo_Theme"
 
+GUI_EXTRA_CSS = """
+#svg-source-code .cm-scroller {
+    max-height: 360px !important;
+    min-height: 360px !important;
+    overflow-y: auto !important;
+}
+"""
+
 # Legacy custom CSS kept for reference, but not applied when using hub themes.
 VSCODE_DARK_CSS = """
 :root {
@@ -889,7 +897,7 @@ def run_pipeline_to_stage(
 
 def create_gui() -> gr.Blocks:
     """Create the Gradio interface."""
-    with gr.Blocks(title="ScribbleTrace - Interactive Parameter Explorer") as app:
+    with gr.Blocks(title="ScribbleTrace - Interactive Parameter Explorer", css=GUI_EXTRA_CSS) as app:
         gr.Markdown(
             """
             # ScribbleTrace Parameter Explorer
@@ -1161,6 +1169,7 @@ def create_gui() -> gr.Blocks:
                 label="SVG Source",
                 language="html",
                 lines=20,
+                elem_id="svg-source-code",
             )
             download_btn = gr.DownloadButton(
                 "Download SVG",
