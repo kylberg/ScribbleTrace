@@ -87,3 +87,18 @@ class TestComputeGradients:
         # Should have discrete values
         unique_values = np.unique(gradients.magnitude)
         assert len(unique_values) <= 10
+
+    def test_gradient_sigma_smoothing(self):
+        """Test that higher Gaussian sigma smooths gradient response."""
+        image = np.zeros((51, 51))
+        image[25, 25] = 1.0
+
+        sharp = compute_gradients(image, sigma=0.0)
+        smooth = compute_gradients(image, sigma=2.0)
+
+        # Smoothing should spread edge energy over a wider area.
+        sharp_active = np.count_nonzero(sharp.magnitude > 0.01)
+        smooth_active = np.count_nonzero(smooth.magnitude > 0.01)
+
+        assert smooth_active > sharp_active
+        assert not np.allclose(sharp.magnitude, smooth.magnitude)

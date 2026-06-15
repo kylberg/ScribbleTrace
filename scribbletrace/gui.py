@@ -11,9 +11,12 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
+import re
 import tempfile
+import xml.dom.minidom
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +25,8 @@ import numpy as np
 from PIL import Image
 
 from scribbletrace import SVGWriter, compute_gradients, load_image, preprocess
+from scribbletrace.image_processing import ProcessedImage
+from scribbletrace.svg_output import SVGConfig
 from scribbletrace.algorithms import (
     Circles,
     CirclesConfig,
@@ -40,6 +45,15 @@ from scribbletrace.algorithms import (
 
 # Default sample image (a simple gradient for testing)
 DEFAULT_IMAGE = None
+DEFAULT_IMAGE_PATH = Path(__file__).resolve().parent.parent / "examples" / "MagrittePipe.jpg"
+
+PIPELINE_STEP_LABELS = [
+    "1. Preprocess",
+    "2. Gradient Magnitude",
+    "3. Final SVG",
+]
+
+PIPELINE_LABEL_TO_INDEX = {label: idx for idx, label in enumerate(PIPELINE_STEP_LABELS)}
 
 HUB_THEME_ID = "Nymbo/Nymbo_Theme"
 
@@ -224,6 +238,16 @@ def create_sample_image() -> np.ndarray:
     return img
 
 
+def get_default_gui_image() -> np.ndarray | None:
+    """Load the default GUI image if available, otherwise return None."""
+    if DEFAULT_IMAGE_PATH.exists():
+        try:
+            return load_image(DEFAULT_IMAGE_PATH)
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
 def svg_to_png(svg_content: str, width: int = 800, height: int = 600) -> Image.Image:
     """Convert SVG content to PNG image for display.
 
@@ -259,90 +283,119 @@ def svg_to_png(svg_content: str, width: int = 800, height: int = 600) -> Image.I
         return img
 
 
-def process_image(
-    input_image: np.ndarray | None,
+def normalize_input_image(input_image: np.ndarray | None) -> np.ndarray:
+    """Normalize an input image to a 2D grayscale float array in [0, 1]."""
+    if input_image is None:
+        input_image = create_sample_image()
+
+    img = np.asarray(input_image, dtype=np.float64)
+
+    if img.max() > 1.0:
+        img = img / 255.0
+
+    if img.ndim == 3:
+        if img.shape[2] == 4:
+            img = 0.2989 * img[:, :, 0] + 0.5870 * img[:, :, 1] + 0.1140 * img[:, :, 2]
+        elif img.shape[2] == 3:
+            img = 0.2989 * img[:, :, 0] + 0.5870 * img[:, :, 1] + 0.1140 * img[:, :, 2]
+        else:
+            img = img[:, :, 0]
+
+    img = np.squeeze(img)
+    if img.ndim != 2:
+        raise ValueError(f"Could not convert image to 2D grayscale. Shape: {img.shape}")
+
+    return np.clip(img, 0.0, 1.0)
+
+
+def to_display_uint8(image: np.ndarray, levels: int | None = None) -> np.ndarray:
+    """Convert an image array to uint8 for Gradio display."""
+    arr = np.asarray(image, dtype=np.float64)
+    if levels is not None and levels > 1:
+        arr = np.clip(arr / float(levels - 1), 0.0, 1.0)
+    else:
+        arr_min = float(arr.min())
+        arr_max = float(arr.max())
+        if arr_max > arr_min:
+            arr = (arr - arr_min) / (arr_max - arr_min)
+        else:
+            arr = np.zeros_like(arr)
+    return np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+
+
+def resize_preview_nearest(image: np.ndarray, target_shape: tuple[int, int]) -> np.ndarray:
+    """Resize a preview image with nearest-neighbor interpolation."""
+    target_h, target_w = target_shape
+    arr = np.asarray(image, dtype=np.uint8)
+
+    if arr.ndim != 2:
+        return arr
+
+    if arr.shape == (target_h, target_w):
+        return arr
+
+    if hasattr(Image, "Resampling"):
+        resample = Image.Resampling.NEAREST
+    else:
+        resample = Image.NEAREST
+
+    return np.asarray(
+        Image.fromarray(arr).resize((target_w, target_h), resample=resample),
+        dtype=np.uint8,
+    )
+
+
+def image_signature(image: np.ndarray) -> str:
+    """Create a stable signature for a normalized image."""
+    digest = hashlib.sha1(image.tobytes()).hexdigest()  # noqa: S324
+    return f"{image.shape}:{digest}"
+
+
+def pretty_format_svg(svg_content: str) -> str:
+    """Return an indented SVG string suitable for source preview."""
+    try:
+        dom = xml.dom.minidom.parseString(svg_content.encode("utf-8"))
+        pretty = dom.toprettyxml(indent="  ")
+        # Remove empty lines introduced by minidom formatting.
+        return "\n".join(line for line in pretty.splitlines() if line.strip())
+    except Exception:
+        return svg_content
+
+
+def resolve_svg_theme(color_theme: str) -> tuple[str, str]:
+    """Return stroke/background colors for a named SVG theme."""
+    if color_theme == "White Lines on Black":
+        return ("white", "black")
+    return ("black", "white")
+
+
+def generate_svg_content(
+    processed: ProcessedImage,
+    gradients,
     algorithm: str,
-    output_width: float,
-    levels: int,
-    invert: bool,
+    color_theme: str,
     stroke_width: float,
     randomness_vertex: float,
     randomness_position: float,
-    # Spirals parameters
     theta_resolution: int,
     spiral_b: float,
     connect_cells: bool,
-    # Circles parameters
     circle_points: int,
     small_first: bool,
-    # Hatching parameters
     hatch_horizontal: bool,
     hatch_vertical: bool,
     hatch_diag_right: bool,
     hatch_diag_left: bool,
     min_spacing: float,
     max_spacing: float,
-    # Lines parameters
     randomness_length: float,
     min_gradient_scale: float,
     max_gradient_scale: float,
-    # Curves parameters
     max_steps: int,
     step_size: float,
     bezier_samples: int,
-) -> tuple[str, str | None, np.ndarray]:
-    """Process image with selected algorithm and parameters.
-
-    Returns:
-        Tuple of (SVG content string, path to temp SVG file for download, gradient magnitude image).
-    """
-    if input_image is None:
-        input_image = create_sample_image()
-
-    # Handle different input formats from Gradio
-    input_image = np.asarray(input_image, dtype=np.float64)
-    
-    # Normalize to [0, 1] first
-    if input_image.max() > 1.0:
-        input_image = input_image / 255.0
-
-    # Ensure grayscale (2D array)
-    if input_image.ndim == 3:
-        if input_image.shape[2] == 4:
-            # RGBA - use luminosity method, ignore alpha
-            input_image = (
-                0.2989 * input_image[:, :, 0] +
-                0.5870 * input_image[:, :, 1] +
-                0.1140 * input_image[:, :, 2]
-            )
-        elif input_image.shape[2] == 3:
-            # RGB - use luminosity method
-            input_image = (
-                0.2989 * input_image[:, :, 0] +
-                0.5870 * input_image[:, :, 1] +
-                0.1140 * input_image[:, :, 2]
-            )
-        else:
-            # Unknown format, just take first channel
-            input_image = input_image[:, :, 0]
-    
-    # Ensure it's 2D
-    input_image = np.squeeze(input_image)
-    if input_image.ndim != 2:
-        raise ValueError(f"Could not convert image to 2D grayscale. Shape: {input_image.shape}")
-
-    # Preprocess image
-    processed = preprocess(
-        input_image,
-        output_width=output_width,
-        levels=levels,
-        invert=invert,
-    )
-
-    # Compute gradients for algorithms that need them
-    gradients = compute_gradients(processed.original)
-
-    # Create algorithm config based on selection
+) -> tuple[str, np.ndarray]:
+    """Generate SVG content and gradient magnitude from already computed intermediates."""
     if algorithm == "spirals":
         config = SpiralsConfig(
             randomness_vertex=randomness_vertex,
@@ -420,253 +473,585 @@ def process_image(
     else:
         raise ValueError(f"Unknown algorithm: {algorithm}")
 
-    # Generate paths
     paths = algo.process()
+    stroke_color, background_color = resolve_svg_theme(color_theme)
+    svg_config = SVGConfig(
+        width=processed.width + 2,
+        height=processed.height + 2,
+        stroke_color=stroke_color,
+        background=background_color,
+    )
+    writer = SVGWriter(paths, config=svg_config)
+    return writer.to_string(), gradients.magnitude
 
-    # Create SVG
-    svg_width = processed.width + 2
-    svg_height = processed.height + 2
-    writer = SVGWriter(paths, width=svg_width, height=svg_height)
+
+def process_image(
+    input_image: np.ndarray | None,
+    algorithm: str,
+    color_theme: str,
+    output_width: float,
+    levels: int,
+    invert: bool,
+    gradient_sigma: float,
+    stroke_width: float,
+    randomness_vertex: float,
+    randomness_position: float,
+    # Spirals parameters
+    theta_resolution: int,
+    spiral_b: float,
+    connect_cells: bool,
+    # Circles parameters
+    circle_points: int,
+    small_first: bool,
+    # Hatching parameters
+    hatch_horizontal: bool,
+    hatch_vertical: bool,
+    hatch_diag_right: bool,
+    hatch_diag_left: bool,
+    min_spacing: float,
+    max_spacing: float,
+    # Lines parameters
+    randomness_length: float,
+    min_gradient_scale: float,
+    max_gradient_scale: float,
+    # Curves parameters
+    max_steps: int,
+    step_size: float,
+    bezier_samples: int,
+) -> tuple[str, str | None, np.ndarray]:
+    """Process image with selected algorithm and parameters.
+
+    Returns:
+        Tuple of (SVG content string, path to temp SVG file for download, gradient magnitude image).
+    """
+    input_image = normalize_input_image(input_image)
+
+    # Preprocess image
+    processed = preprocess(
+        input_image,
+        output_width=output_width,
+        levels=levels,
+        invert=invert,
+    )
+
+    # Compute gradients for algorithms that need them
+    gradients = compute_gradients(processed.original, sigma=gradient_sigma)
+
+    svg_content, gradient_magnitude = generate_svg_content(
+        processed,
+        gradients,
+        algorithm,
+        color_theme,
+        stroke_width,
+        randomness_vertex,
+        randomness_position,
+        theta_resolution,
+        spiral_b,
+        connect_cells,
+        circle_points,
+        small_first,
+        hatch_horizontal,
+        hatch_vertical,
+        hatch_diag_right,
+        hatch_diag_left,
+        min_spacing,
+        max_spacing,
+        randomness_length,
+        min_gradient_scale,
+        max_gradient_scale,
+        max_steps,
+        step_size,
+        bezier_samples,
+    )
 
     # Save to temp file for download
     with tempfile.NamedTemporaryFile(suffix=".svg", delete=False, mode="w") as f:
-        svg_content = writer.to_string()
         f.write(svg_content)
         temp_path = f.name
 
-    return svg_content, temp_path, gradients.magnitude
+    return svg_content, temp_path, gradient_magnitude
+
+
+def run_pipeline_to_stage(
+    pipeline_cache: dict[str, Any] | None,
+    input_image: np.ndarray | None,
+    target_stage_index: int,
+    algorithm: str,
+    color_theme: str,
+    output_width: float,
+    levels: int,
+    invert: bool,
+    gradient_sigma: float,
+    stroke_width: float,
+    randomness_vertex: float,
+    randomness_position: float,
+    theta_resolution: int,
+    spiral_b: float,
+    connect_cells: bool,
+    circle_points: int,
+    small_first: bool,
+    hatch_horizontal: bool,
+    hatch_vertical: bool,
+    hatch_diag_right: bool,
+    hatch_diag_left: bool,
+    min_spacing: float,
+    max_spacing: float,
+    randomness_length: float,
+    min_gradient_scale: float,
+    max_gradient_scale: float,
+    max_steps: int,
+    step_size: float,
+    bezier_samples: int,
+) -> tuple[
+    Image.Image | None,
+    str,
+    Any,
+    np.ndarray | None,
+    np.ndarray | None,
+    np.ndarray | None,
+    np.ndarray | None,
+    str,
+    dict[str, Any],
+]:
+    """Run the image pipeline up to a target stage and return GUI-ready outputs."""
+    cache = pipeline_cache if isinstance(pipeline_cache, dict) else {}
+    target_stage_index = int(np.clip(target_stage_index, 0, len(PIPELINE_STEP_LABELS) - 1))
+
+    grayscale = normalize_input_image(input_image)
+    image_key = image_signature(grayscale)
+    if cache.get("image_key") != image_key:
+        cache = {"image_key": image_key, "grayscale": grayscale}
+    else:
+        cache["grayscale"] = grayscale
+
+    step1_image = 1.0 - grayscale if invert else grayscale
+    grayscale_display = to_display_uint8(step1_image)
+    preview_shape = grayscale_display.shape
+
+    downscaled_display = None
+    quantized_display = None
+    gradient_display = None
+
+    processed: ProcessedImage | None = None
+    gradients = None
+
+    if target_stage_index >= 0:
+        processed_key = (float(output_width), int(levels), bool(invert))
+        if cache.get("processed_key") != processed_key:
+            cache["processed"] = preprocess(grayscale, output_width=output_width, levels=levels, invert=invert)
+            cache["processed_key"] = processed_key
+            cache["gradients_by_sigma"] = {}
+            cache["svg_by_key"] = {}
+        processed = cache["processed"]
+        resized_inverted = 1.0 - processed.original if invert else processed.original
+        downscaled_display = to_display_uint8(resized_inverted)
+        downscaled_display = resize_preview_nearest(downscaled_display, preview_shape)
+
+    if target_stage_index >= 0 and processed is not None:
+        quantized_display = to_display_uint8(processed.data, levels=processed.levels)
+        quantized_display = resize_preview_nearest(quantized_display, preview_shape)
+
+    if target_stage_index >= 1 and processed is not None:
+        sigma_key = round(float(gradient_sigma), 4)
+        gradients_by_sigma = cache.setdefault("gradients_by_sigma", {})
+        gradients = gradients_by_sigma.get(sigma_key)
+        if gradients is None:
+            gradients = compute_gradients(processed.original, sigma=gradient_sigma)
+            gradients_by_sigma[sigma_key] = gradients
+        gradient_display = to_display_uint8(gradients.magnitude)
+        gradient_display = resize_preview_nearest(gradient_display, preview_shape)
+
+    svg_preview_image = None
+    svg_code = ""
+    download_update = gr.update(value=None, interactive=False)
+
+    if target_stage_index >= 2:
+        if processed is None:
+            processed = preprocess(grayscale, output_width=output_width, levels=levels, invert=invert)
+
+        sigma_key = round(float(gradient_sigma), 4)
+        gradients_by_sigma = cache.setdefault("gradients_by_sigma", {})
+        gradients = gradients_by_sigma.get(sigma_key)
+        if gradients is None:
+            gradients = compute_gradients(processed.original, sigma=gradient_sigma)
+            gradients_by_sigma[sigma_key] = gradients
+
+        svg_key = (
+            algorithm,
+            color_theme,
+            float(stroke_width),
+            float(randomness_vertex),
+            float(randomness_position),
+            int(theta_resolution),
+            float(spiral_b),
+            bool(connect_cells),
+            int(circle_points),
+            bool(small_first),
+            bool(hatch_horizontal),
+            bool(hatch_vertical),
+            bool(hatch_diag_right),
+            bool(hatch_diag_left),
+            float(min_spacing),
+            float(max_spacing),
+            float(randomness_length),
+            float(min_gradient_scale),
+            float(max_gradient_scale),
+            int(max_steps),
+            float(step_size),
+            int(bezier_samples),
+            sigma_key,
+        )
+        svg_by_key = cache.setdefault("svg_by_key", {})
+        cached_svg = svg_by_key.get(svg_key)
+        if cached_svg is None:
+            cached_svg = generate_svg_content(
+                processed,
+                gradients,
+                algorithm,
+                color_theme,
+                stroke_width,
+                randomness_vertex,
+                randomness_position,
+                theta_resolution,
+                spiral_b,
+                connect_cells,
+                circle_points,
+                small_first,
+                hatch_horizontal,
+                hatch_vertical,
+                hatch_diag_right,
+                hatch_diag_left,
+                min_spacing,
+                max_spacing,
+                randomness_length,
+                min_gradient_scale,
+                max_gradient_scale,
+                max_steps,
+                step_size,
+                bezier_samples,
+            )
+            svg_by_key[svg_key] = cached_svg
+
+        svg_content, gradient_magnitude = cached_svg
+
+        with tempfile.NamedTemporaryFile(suffix=".svg", delete=False, mode="w") as f:
+            f.write(svg_content)
+            temp_path = f.name
+
+        # Render a high-resolution raster preview so Gradio's built-in
+        # image expansion/zoom can be used reliably.
+        width_match = re.search(r'width="([\d.]+)mm"', svg_content)
+        height_match = re.search(r'height="([\d.]+)mm"', svg_content)
+
+        preview_width_px = 1600
+        preview_height_px = 1200
+        if width_match and height_match:
+            w = float(width_match.group(1))
+            h = float(height_match.group(1))
+
+            longest = max(w, h, 1.0)
+            scale = 2200.0 / longest
+            preview_width_px = int(np.clip(round(w * scale), 800, 2600))
+            preview_height_px = int(np.clip(round(h * scale), 600, 2600))
+
+        svg_preview_image = svg_to_png(
+            svg_content,
+            width=preview_width_px,
+            height=preview_height_px,
+        )
+        svg_code = pretty_format_svg(svg_content)
+        download_update = gr.update(value=temp_path, interactive=True)
+
+        # Keep gradient tab meaningful for all algorithms once gradients are computed.
+        if gradient_display is None:
+            gradient_display = to_display_uint8(gradient_magnitude)
+            gradient_display = resize_preview_nearest(gradient_display, preview_shape)
+
+    status = f"Pipeline at {PIPELINE_STEP_LABELS[target_stage_index]}"
+    return (
+        svg_preview_image,
+        svg_code,
+        download_update,
+        gradient_display,
+        grayscale_display,
+        downscaled_display,
+        quantized_display,
+        status,
+        cache,
+    )
 
 
 def create_gui() -> gr.Blocks:
     """Create the Gradio interface."""
-
-    with gr.Blocks(
-        title="ScribbleTrace - Interactive Parameter Explorer",
-    ) as app:
+    with gr.Blocks(title="ScribbleTrace - Interactive Parameter Explorer") as app:
         gr.Markdown(
             """
             # ScribbleTrace Parameter Explorer
 
-            Upload an image and explore different vectorization algorithms and their parameters.
-            The preview updates automatically as you adjust settings.
-
-            **Tip:** Start with a simple image and low output width for faster preview.
+            Notebook-style pipeline where each step has local settings, output, and rerun controls.
             """
         )
 
-        with gr.Row():
-            # Left column: Input and parameters
-            with gr.Column(scale=1):
-                input_image = gr.Image(
-                    label="Input Image",
-                    type="numpy",
-                    sources=["upload", "clipboard"],
+        with gr.Accordion("Input", open=True, elem_id="step-input"):
+            input_image = gr.Image(
+                label="Input Image",
+                type="numpy",
+                sources=["upload", "clipboard"],
+                value=get_default_gui_image(),
+            )
+
+        with gr.Accordion("Step Navigation", open=False):
+            gr.Markdown(
+                """
+                Jump like a document: [Step 1](#step-1) | [Step 2](#step-2) | [Step 3](#step-3)
+                """
+            )
+            with gr.Row():
+                run_step_btn = gr.Button("Run 1 Step", variant="secondary")
+                run_to_btn = gr.Button("Run To Selected", variant="secondary")
+                run_all_btn = gr.Button("Run All", variant="primary")
+
+            target_step = gr.Dropdown(
+                choices=PIPELINE_STEP_LABELS,
+                value=PIPELINE_STEP_LABELS[-1],
+                label="Selected Pipeline Step",
+            )
+            pipeline_status = gr.Markdown("Pipeline at 1. Preprocess")
+
+        with gr.Accordion("Step 1 - Preprocess (Resize, Invert, Quantize)", open=False, elem_id="step-1"):
+            output_width = gr.Slider(
+                minimum=10,
+                maximum=200,
+                value=40,
+                step=1,
+                label="Output Width (cells)",
+                info="Number of cells across the image",
+            )
+            invert = gr.Checkbox(
+                value=True,
+                label="Invert",
+                info="Dark areas produce more marks",
+            )
+            levels = gr.Slider(
+                minimum=2,
+                maximum=16,
+                value=7,
+                step=1,
+                label="Intensity Levels",
+                info="Number of quantization levels",
+            )
+            run_gray_btn = gr.Button("Play Until Here", variant="secondary")
+            grayscale_output = gr.Image(
+                label="Resized + Invert Output",
+                type="numpy",
+                interactive=False,
+            )
+            quantized_output = gr.Image(
+                label="Quantized Output",
+                type="numpy",
+                interactive=False,
+            )
+            # Keep this hidden component for stable callback outputs.
+            downscaled_output = gr.Image(
+                label="",
+                type="numpy",
+                interactive=False,
+                visible=False,
+            )
+
+        with gr.Accordion("Step 2 - Gradient Magnitude", open=False, elem_id="step-2"):
+            gradient_sigma = gr.Slider(
+                minimum=0.0,
+                maximum=6.0,
+                value=1.0,
+                step=0.1,
+                label="Gradient Sigma",
+                info="Gaussian smoothing before gradient magnitude",
+            )
+            run_gradient_btn = gr.Button("Play Until Here", variant="secondary")
+            gradient_output = gr.Image(
+                label="Step 2 Output",
+                type="numpy",
+                interactive=False,
+            )
+
+        with gr.Accordion("Step 3 - Final SVG", open=True, elem_id="step-3"):
+            algorithm = gr.Dropdown(
+                choices=["spirals", "circles", "squares", "lines", "curves", "hatching"],
+                value="spirals",
+                label="Algorithm",
+            )
+            color_theme = gr.Dropdown(
+                choices=["Black Lines on White", "White Lines on Black"],
+                value="Black Lines on White",
+                label="SVG Color Theme",
+            )
+            stroke_width = gr.Slider(
+                minimum=0.01,
+                maximum=2.0,
+                value=0.5,
+                step=0.01,
+                label="Stroke Width (mm)",
+            )
+
+            with gr.Accordion("Shared Randomness", open=False):
+                randomness_vertex = gr.Slider(
+                    minimum=0.0,
+                    maximum=0.5,
+                    value=0.1,
+                    step=0.01,
+                    label="Vertex Randomness",
+                    info="Random displacement of vertices",
+                )
+                randomness_position = gr.Slider(
+                    minimum=0.0,
+                    maximum=1.0,
+                    value=0.0,
+                    step=0.05,
+                    label="Position Randomness",
+                    info="Random offset of element positions",
                 )
 
-                algorithm = gr.Dropdown(
-                    choices=["spirals", "circles", "squares", "lines", "curves", "hatching"],
-                    value="spirals",
-                    label="Algorithm",
+            with gr.Accordion("Spirals Settings", open=False, visible=True) as spirals_accordion:
+                theta_resolution = gr.Slider(
+                    minimum=10,
+                    maximum=100,
+                    value=50,
+                    step=5,
+                    label="Theta Resolution",
+                    info="Points per rotation",
+                )
+                spiral_b = gr.Slider(
+                    minimum=0.1,
+                    maximum=3.0,
+                    value=1.0,
+                    step=0.1,
+                    label="Spiral Growth Rate",
+                )
+                connect_cells = gr.Checkbox(
+                    value=True,
+                    label="Connect Cells",
+                    info="Draw lines between cells",
                 )
 
-                with gr.Accordion("General Settings", open=True):
-                    output_width = gr.Slider(
-                        minimum=10,
-                        maximum=200,
-                        value=40,
-                        step=1,
-                        label="Output Width (cells)",
-                        info="Number of cells across the image",
-                    )
-                    levels = gr.Slider(
-                        minimum=2,
-                        maximum=16,
-                        value=7,
-                        step=1,
-                        label="Intensity Levels",
-                        info="Number of quantization levels",
-                    )
-                    invert = gr.Checkbox(
-                        value=True,
-                        label="Invert",
-                        info="Dark areas produce more marks",
-                    )
-                    stroke_width = gr.Slider(
-                        minimum=0.01,
-                        maximum=2.0,
-                        value=0.5,
-                        step=0.01,
-                        label="Stroke Width (mm)",
-                    )
-
-                with gr.Accordion("Randomness", open=False):
-                    randomness_vertex = gr.Slider(
-                        minimum=0.0,
-                        maximum=0.5,
-                        value=0.1,
-                        step=0.01,
-                        label="Vertex Randomness",
-                        info="Random displacement of vertices",
-                    )
-                    randomness_position = gr.Slider(
-                        minimum=0.0,
-                        maximum=1.0,
-                        value=0.0,
-                        step=0.05,
-                        label="Position Randomness",
-                        info="Random offset of element positions",
-                    )
-
-                # Algorithm-specific parameters
-                with gr.Accordion("Spirals Settings", open=False, visible=True) as spirals_accordion:
-                    theta_resolution = gr.Slider(
-                        minimum=10,
-                        maximum=100,
-                        value=50,
-                        step=5,
-                        label="Theta Resolution",
-                        info="Points per rotation",
-                    )
-                    spiral_b = gr.Slider(
-                        minimum=0.1,
-                        maximum=3.0,
-                        value=1.0,
-                        step=0.1,
-                        label="Spiral Growth Rate",
-                    )
-                    connect_cells = gr.Checkbox(
-                        value=True,
-                        label="Connect Cells",
-                        info="Draw lines between cells",
-                    )
-
-                with gr.Accordion("Circles/Squares Settings", open=False, visible=False) as circles_accordion:
-                    circle_points = gr.Slider(
-                        minimum=12,
-                        maximum=72,
-                        value=36,
-                        step=6,
-                        label="Circle Points",
-                        info="Points per circle (circles only)",
-                    )
-                    small_first = gr.Checkbox(
-                        value=True,
-                        label="Small First",
-                        info="Draw smaller shapes first",
-                    )
-
-                with gr.Accordion("Lines Settings", open=False, visible=False) as lines_accordion:
-                    randomness_length = gr.Slider(
-                        minimum=0.0,
-                        maximum=1.0,
-                        value=0.0,
-                        step=0.05,
-                        label="Length Randomness",
-                    )
-                    min_gradient_scale = gr.Slider(
-                        minimum=0.01,
-                        maximum=1.0,
-                        value=0.1,
-                        step=0.01,
-                        label="Min Gradient Scale",
-                    )
-                    max_gradient_scale = gr.Slider(
-                        minimum=1.0,
-                        maximum=20.0,
-                        value=10.0,
-                        step=0.5,
-                        label="Max Gradient Scale",
-                    )
-
-                with gr.Accordion("Curves Settings", open=False, visible=False) as curves_accordion:
-                    max_steps = gr.Slider(
-                        minimum=1,
-                        maximum=20,
-                        value=4,
-                        step=1,
-                        label="Max Steps",
-                    )
-                    step_size = gr.Slider(
-                        minimum=0.5,
-                        maximum=5.0,
-                        value=2.0,
-                        step=0.25,
-                        label="Step Size",
-                    )
-                    bezier_samples = gr.Slider(
-                        minimum=5,
-                        maximum=50,
-                        value=15,
-                        step=5,
-                        label="Bezier Samples",
-                    )
-
-                with gr.Accordion("Hatching Settings", open=False, visible=False) as hatching_accordion:
-                    gr.Markdown("**Hatching Directions:**")
-                    hatch_horizontal = gr.Checkbox(value=False, label="Horizontal")
-                    hatch_vertical = gr.Checkbox(value=False, label="Vertical")
-                    hatch_diag_right = gr.Checkbox(value=True, label="Diagonal Right (\\)")
-                    hatch_diag_left = gr.Checkbox(value=False, label="Diagonal Left (/)")
-                    min_spacing = gr.Slider(
-                        minimum=0.1,
-                        maximum=2.0,
-                        value=0.3,
-                        step=0.1,
-                        label="Min Spacing (dark areas)",
-                    )
-                    max_spacing = gr.Slider(
-                        minimum=0.5,
-                        maximum=5.0,
-                        value=2.0,
-                        step=0.25,
-                        label="Max Spacing (light areas)",
-                    )
-
-                generate_btn = gr.Button("Generate Preview", variant="primary", size="lg")
-
-                with gr.Accordion("Presets", open=False):
-                    save_preset_btn = gr.DownloadButton(
-                        "Download Settings JSON",
-                        value=None,
-                        variant="secondary",
-                        size="lg",
-                    )
-                    load_preset_file = gr.File(
-                        label="Load Settings JSON",
-                        file_types=[".json"],
-                        type="filepath",
-                    )
-                    apply_preset_btn = gr.Button("Apply Loaded Preset", variant="secondary")
-                    preset_status = gr.Markdown("")
-
-            # Right column: Output preview
-            with gr.Column(scale=2):
-                with gr.Tabs():
-                    with gr.TabItem("SVG Preview"):
-                        svg_output = gr.HTML(
-                            label="SVG Preview",
-                            elem_id="svg-preview",
-                        )
-                    with gr.TabItem("SVG Code"):
-                        svg_code = gr.Code(
-                            label="SVG Source",
-                            language="html",
-                            lines=20,
-                        )
-                    with gr.TabItem("Gradient Magnitude"):
-                        gradient_output = gr.Image(
-                            label="Gradient Magnitude",
-                            type="numpy",
-                            interactive=False,
-                        )
-
-                download_btn = gr.DownloadButton(
-                    "Download SVG",
-                    value=None,
-                    variant="primary",
-                    size="lg",
-                    interactive=False,
+            with gr.Accordion("Circles/Squares Settings", open=False, visible=False) as circles_accordion:
+                circle_points = gr.Slider(
+                    minimum=12,
+                    maximum=72,
+                    value=36,
+                    step=6,
+                    label="Circle Points",
+                    info="Points per circle (circles only)",
                 )
+                small_first = gr.Checkbox(
+                    value=True,
+                    label="Small First",
+                    info="Draw smaller shapes first",
+                )
+
+            with gr.Accordion("Lines Settings", open=False, visible=False) as lines_accordion:
+                randomness_length = gr.Slider(
+                    minimum=0.0,
+                    maximum=1.0,
+                    value=0.0,
+                    step=0.05,
+                    label="Length Randomness",
+                )
+                min_gradient_scale = gr.Slider(
+                    minimum=0.01,
+                    maximum=1.0,
+                    value=0.1,
+                    step=0.01,
+                    label="Min Gradient Scale",
+                )
+                max_gradient_scale = gr.Slider(
+                    minimum=1.0,
+                    maximum=20.0,
+                    value=10.0,
+                    step=0.5,
+                    label="Max Gradient Scale",
+                )
+
+            with gr.Accordion("Curves Settings", open=False, visible=False) as curves_accordion:
+                max_steps = gr.Slider(
+                    minimum=1,
+                    maximum=20,
+                    value=4,
+                    step=1,
+                    label="Max Steps",
+                )
+                step_size = gr.Slider(
+                    minimum=0.5,
+                    maximum=5.0,
+                    value=2.0,
+                    step=0.25,
+                    label="Step Size",
+                )
+                bezier_samples = gr.Slider(
+                    minimum=5,
+                    maximum=50,
+                    value=15,
+                    step=5,
+                    label="Bezier Samples",
+                )
+
+            with gr.Accordion("Hatching Settings", open=False, visible=False) as hatching_accordion:
+                gr.Markdown("**Hatching Directions:**")
+                hatch_horizontal = gr.Checkbox(value=False, label="Horizontal")
+                hatch_vertical = gr.Checkbox(value=False, label="Vertical")
+                hatch_diag_right = gr.Checkbox(value=True, label="Diagonal Right (\\)")
+                hatch_diag_left = gr.Checkbox(value=False, label="Diagonal Left (/)")
+                min_spacing = gr.Slider(
+                    minimum=0.1,
+                    maximum=2.0,
+                    value=0.3,
+                    step=0.1,
+                    label="Min Spacing (dark areas)",
+                )
+                max_spacing = gr.Slider(
+                    minimum=0.5,
+                    maximum=5.0,
+                    value=2.0,
+                    step=0.25,
+                    label="Max Spacing (light areas)",
+                )
+
+            run_final_btn = gr.Button("Play Until Here", variant="primary")
+            svg_output = gr.Image(
+                label="SVG Preview",
+                type="pil",
+                interactive=False,
+            )
+            svg_code = gr.Code(
+                label="SVG Source",
+                language="html",
+                lines=20,
+            )
+            download_btn = gr.DownloadButton(
+                "Download SVG",
+                value=None,
+                variant="primary",
+                size="lg",
+                interactive=False,
+            )
+
+        with gr.Accordion("Presets", open=False):
+            save_preset_btn = gr.DownloadButton(
+                "Download Settings JSON",
+                value=None,
+                variant="secondary",
+                size="lg",
+            )
+            load_preset_file = gr.File(
+                label="Load Settings JSON",
+                file_types=[".json"],
+                type="filepath",
+            )
+            apply_preset_btn = gr.Button("Apply Loaded Preset", variant="secondary")
+            preset_status = gr.Markdown("")
+
+        current_stage_state = gr.State(value=0)
+        pipeline_cache_state = gr.State(value={})
 
         # Visibility toggling based on algorithm selection
         def update_visibility(algo: str):
@@ -684,80 +1069,145 @@ def create_gui() -> gr.Blocks:
             outputs=[spirals_accordion, circles_accordion, lines_accordion, curves_accordion, hatching_accordion],
         )
 
-        # Process function
-        def on_generate(
-            img, algo, width, lvls, inv, stroke, rand_v, rand_p,
-            theta_res, spiral_growth, connect,
-            circ_pts, sm_first,
-            hatch_h, hatch_v, hatch_dr, hatch_dl, min_sp, max_sp,
-            rand_len, min_grad, max_grad,
-            m_steps, s_size, bez_samp,
+        # Process functions
+        def on_run_to_stage(
+            target_stage_idx,
+            cache,
+            img,
+            algo,
+            theme,
+            width,
+            lvls,
+            inv,
+            grad_sigma,
+            stroke,
+            rand_v,
+            rand_p,
+            theta_res,
+            spiral_growth,
+            connect,
+            circ_pts,
+            sm_first,
+            hatch_h,
+            hatch_v,
+            hatch_dr,
+            hatch_dl,
+            min_sp,
+            max_sp,
+            rand_len,
+            min_grad,
+            max_grad,
+            m_steps,
+            s_size,
+            bez_samp,
         ):
-            svg_content, temp_path, gradient_magnitude = process_image(
-                img, algo, width, lvls, inv, stroke, rand_v, rand_p,
-                theta_res, spiral_growth, connect,
-                circ_pts, sm_first,
-                hatch_h, hatch_v, hatch_dr, hatch_dl, min_sp, max_sp,
-                rand_len, min_grad, max_grad,
-                m_steps, s_size, bez_samp,
+            return run_pipeline_to_stage(
+                cache,
+                img,
+                target_stage_idx,
+                algo,
+                theme,
+                width,
+                lvls,
+                inv,
+                grad_sigma,
+                stroke,
+                rand_v,
+                rand_p,
+                theta_res,
+                spiral_growth,
+                connect,
+                circ_pts,
+                sm_first,
+                hatch_h,
+                hatch_v,
+                hatch_dr,
+                hatch_dl,
+                min_sp,
+                max_sp,
+                rand_len,
+                min_grad,
+                max_grad,
+                m_steps,
+                s_size,
+                bez_samp,
             )
 
-            # Only show gradient magnitude for algorithms that use it directly.
-            if algo in {"lines", "curves", "hatching"}:
-                gradient_display = np.clip(gradient_magnitude * 255.0, 0, 255).astype(np.uint8)
-            else:
-                gradient_display = None
+        def run_step(current_stage, *params):
+            next_stage = min(int(current_stage) + 1, len(PIPELINE_STEP_LABELS) - 1)
+            outputs = on_run_to_stage(next_stage, *params)
+            ui_outputs = outputs[:-1]
+            cache = outputs[-1]
+            return (*ui_outputs, next_stage, cache)
 
-            # Scale SVG to fill panel width while preserving aspect ratio
-            import re
-            svg_display = svg_content
-            
-            # Extract width/height values (they are in mm)
-            width_match = re.search(r'width="([\d.]+)mm"', svg_content)
-            height_match = re.search(r'height="([\d.]+)mm"', svg_content)
-            
-            if width_match and height_match:
-                w = float(width_match.group(1))
-                h = float(height_match.group(1))
-                
-                # Add viewBox attribute if not present, and set width to 100%
-                if 'viewBox' not in svg_content:
-                    svg_display = re.sub(
-                        r'<svg([^>]*)width="[\d.]+mm"([^>]*)height="[\d.]+mm"',
-                        f'<svg\\1width="100%"\\2viewBox="0 0 {w} {h}"',
-                        svg_display
-                    )
-                else:
-                    svg_display = re.sub(r'width="[\d.]+mm"', 'width="100%"', svg_display)
-                
-                # Remove height to let aspect ratio control it
-                svg_display = re.sub(r'\s*height="[\d.]+mm"', '', svg_display)
+        def run_to_selected(step_label, *params):
+            target_stage = PIPELINE_LABEL_TO_INDEX.get(step_label, len(PIPELINE_STEP_LABELS) - 1)
+            outputs = on_run_to_stage(target_stage, *params)
+            ui_outputs = outputs[:-1]
+            cache = outputs[-1]
+            return (*ui_outputs, target_stage, cache)
 
-            # Create HTML to display SVG inline with white background
-            html_preview = f"""
-            <div style="background: white; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
-                {svg_display}
-            </div>
-            """
+        def run_all(*params):
+            target_stage = len(PIPELINE_STEP_LABELS) - 1
+            outputs = on_run_to_stage(target_stage, *params)
+            ui_outputs = outputs[:-1]
+            cache = outputs[-1]
+            return (*ui_outputs, target_stage, cache)
 
-            return html_preview, svg_content, gr.update(value=temp_path, interactive=True), gradient_display
+        def run_to_fixed_stage(stage_index: int, *params):
+            outputs = on_run_to_stage(stage_index, *params)
+            ui_outputs = outputs[:-1]
+            cache = outputs[-1]
+            return (*ui_outputs, stage_index, cache)
 
-        # Collect all inputs
-        all_inputs = [
-            input_image, algorithm, output_width, levels, invert, stroke_width,
-            randomness_vertex, randomness_position,
-            theta_resolution, spiral_b, connect_cells,
-            circle_points, small_first,
-            hatch_horizontal, hatch_vertical, hatch_diag_right, hatch_diag_left,
-            min_spacing, max_spacing,
-            randomness_length, min_gradient_scale, max_gradient_scale,
-            max_steps, step_size, bezier_samples,
+        # Collect all processing inputs
+        pipeline_inputs = [
+            input_image,
+            algorithm,
+            color_theme,
+            output_width,
+            levels,
+            invert,
+            gradient_sigma,
+            stroke_width,
+            randomness_vertex,
+            randomness_position,
+            theta_resolution,
+            spiral_b,
+            connect_cells,
+            circle_points,
+            small_first,
+            hatch_horizontal,
+            hatch_vertical,
+            hatch_diag_right,
+            hatch_diag_left,
+            min_spacing,
+            max_spacing,
+            randomness_length,
+            min_gradient_scale,
+            max_gradient_scale,
+            max_steps,
+            step_size,
+            bezier_samples,
+        ]
+
+        pipeline_outputs = [
+            svg_output,
+            svg_code,
+            download_btn,
+            gradient_output,
+            grayscale_output,
+            downscaled_output,
+            quantized_output,
+            pipeline_status,
         ]
 
         setting_keys = [
             "algorithm",
+            "color_theme",
             "output_width",
             "levels",
+            "gradient_sigma",
             "invert",
             "stroke_width",
             "randomness_vertex",
@@ -783,8 +1233,10 @@ def create_gui() -> gr.Blocks:
 
         setting_components = [
             algorithm,
+            color_theme,
             output_width,
             levels,
+            gradient_sigma,
             invert,
             stroke_width,
             randomness_vertex,
@@ -871,26 +1323,47 @@ def create_gui() -> gr.Blocks:
                     f"Failed to load preset: {err}",
                 )
 
-        generate_btn.click(
-            fn=on_generate,
-            inputs=all_inputs,
-            outputs=[svg_output, svg_code, download_btn, gradient_output],
+        run_step_btn.click(
+            fn=run_step,
+            inputs=[current_stage_state, pipeline_cache_state, *pipeline_inputs],
+            outputs=[*pipeline_outputs, current_stage_state, pipeline_cache_state],
         )
 
-        # Auto-generate on parameter changes (with debounce via queue)
-        for component in all_inputs:
-            if component != input_image:  # Don't auto-trigger on image upload
-                component.change(
-                    fn=on_generate,
-                    inputs=all_inputs,
-                    outputs=[svg_output, svg_code, download_btn, gradient_output],
-                )
+        run_to_btn.click(
+            fn=run_to_selected,
+            inputs=[target_step, pipeline_cache_state, *pipeline_inputs],
+            outputs=[*pipeline_outputs, current_stage_state, pipeline_cache_state],
+        )
 
-        # Initial generation when image is uploaded
+        run_all_btn.click(
+            fn=run_all,
+            inputs=[pipeline_cache_state, *pipeline_inputs],
+            outputs=[*pipeline_outputs, current_stage_state, pipeline_cache_state],
+        )
+
+        run_gray_btn.click(
+            fn=lambda *params: run_to_fixed_stage(0, *params),
+            inputs=[pipeline_cache_state, *pipeline_inputs],
+            outputs=[*pipeline_outputs, current_stage_state, pipeline_cache_state],
+        )
+
+        run_gradient_btn.click(
+            fn=lambda *params: run_to_fixed_stage(1, *params),
+            inputs=[pipeline_cache_state, *pipeline_inputs],
+            outputs=[*pipeline_outputs, current_stage_state, pipeline_cache_state],
+        )
+
+        run_final_btn.click(
+            fn=lambda *params: run_to_fixed_stage(2, *params),
+            inputs=[pipeline_cache_state, *pipeline_inputs],
+            outputs=[*pipeline_outputs, current_stage_state, pipeline_cache_state],
+        )
+
+        # New images start at step 1 preview to support step-by-step workflows.
         input_image.change(
-            fn=on_generate,
-            inputs=all_inputs,
-            outputs=[svg_output, svg_code, download_btn, gradient_output],
+            fn=lambda *params: run_to_selected(PIPELINE_STEP_LABELS[0], *params),
+            inputs=[pipeline_cache_state, *pipeline_inputs],
+            outputs=[*pipeline_outputs, current_stage_state, pipeline_cache_state],
         )
 
         save_preset_btn.click(

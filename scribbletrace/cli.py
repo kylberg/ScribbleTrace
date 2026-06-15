@@ -113,6 +113,13 @@ def create_parser() -> argparse.ArgumentParser:
         help="Randomness for vertex positions (default: 0.1)",
     )
 
+    parser.add_argument(
+        "--gradient-sigma",
+        type=float,
+        default=1.0,
+        help="Gaussian sigma for gradient magnitude (default: 1.0)",
+    )
+
     # Hatching-specific options
     parser.add_argument(
         "--hatch-directions",
@@ -214,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         if needs_gradients:
             if args.verbose:
                 print("Computing image gradients...")
-            gradients = compute_gradients(processed.original)
+            gradients = compute_gradients(processed.original, sigma=args.gradient_sigma)
 
         # Create config
         config_kwargs = {

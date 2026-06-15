@@ -71,6 +71,11 @@ class Spirals(Algorithm):
             3, round(cfg.theta_resolution * theta_range / (2 * np.pi))
         )
 
+        # Ensure theta=0 is sampled; even sample counts skip the center and can
+        # create a straight bridging segment through the spiral every other level.
+        if n_vertices % 2 == 0:
+            n_vertices += 1
+
         vertices = []
         thetas = np.linspace(-theta_range, theta_range, n_vertices)
 
@@ -117,6 +122,10 @@ class Spirals(Algorithm):
         """
         cfg = self.config
 
+        # Position randomness moves the whole motif inside its cell.
+        pos_jitter_x = self.random_offset(cfg.randomness_position)
+        pos_jitter_y = self.random_offset(cfg.randomness_position)
+
         if value > 0:
             theta_range = value * np.pi
             vertices = self._vertices_on_spiral(theta_range)
@@ -130,11 +139,37 @@ class Spirals(Algorithm):
                 # Fixed maximum size
                 max_size = 22
                 vertices = [(x / max_size * 0.5, y / max_size * 0.5) for x, y in vertices]
+
+            # Vertex randomness adds local wobble to spiral samples.
+            if cfg.randomness_vertex > 0 and vertices:
+                vertices = [
+                    (
+                        x + self.random_offset(cfg.randomness_vertex),
+                        y + self.random_offset(cfg.randomness_vertex),
+                    )
+                    for x, y in vertices
+                ]
         else:
             vertices = self._vertices_on_sine()
 
+            # Also allow slight wobble for weak-wave cells.
+            if cfg.randomness_vertex > 0 and vertices:
+                vertices = [
+                    (
+                        x + self.random_offset(cfg.randomness_vertex),
+                        y + self.random_offset(cfg.randomness_vertex),
+                    )
+                    for x, y in vertices
+                ]
+
         # Translate to cell position
-        vertices = [(x + col, y + row) for x, y in vertices]
+        vertices = [(x + col + pos_jitter_x, y + row + pos_jitter_y) for x, y in vertices]
+
+        # Keep a consistent left-to-right drawing direction across levels.
+        # Without this, odd/even levels can flip start/end sides and produce
+        # a horizontal crossing artifact when cells are connected.
+        if len(vertices) >= 2 and vertices[0][0] > vertices[-1][0]:
+            vertices = list(reversed(vertices))
 
         return vertices
 

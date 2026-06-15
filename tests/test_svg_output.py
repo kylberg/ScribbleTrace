@@ -88,6 +88,20 @@ class TestSVGWriter:
 
         assert bounds == (0, 0, 25, 30)
 
+    def test_background_matches_dynamic_viewbox(self):
+        """Background should cover full dynamic viewBox, including negative offsets."""
+        paths = [PathSegment(points=[(0, 0), (10, 0)], stroke_width=1.0)]
+        cfg = SVGConfig(width=12, height=12, background="black", stroke_color="white")
+        writer = SVGWriter(paths, config=cfg)
+
+        svg_string = writer.to_string()
+
+        assert 'viewBox="-0.5 -0.5 12.5 12.5"' in svg_string
+        assert 'x="-0.5"' in svg_string
+        assert 'y="-0.5"' in svg_string
+        assert 'width="12.5"' in svg_string
+        assert 'height="12.5"' in svg_string
+
 
 class TestOptimizePathOrder:
     """Tests for path optimization."""

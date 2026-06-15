@@ -35,6 +35,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gui = [
+    "gradio>=4.0",
+]
 dev = [
     "pytest>=7.0",
     "ruff>=0.1",
@@ -42,6 +45,7 @@ dev = [
 
 [project.scripts]
 scribbletrace = "scribbletrace.cli:main"
+scribbletrace-gui = "scribbletrace.gui:main"
 
 [project.urls]
 Homepage = "https://github.com/kylberg/ScribbleTrace"

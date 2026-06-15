@@ -147,6 +147,7 @@ def preprocess(
 
 def compute_gradients(
     image: NDArray[np.float64],
+    sigma: float = 1.0,
     quantize_magnitude: bool = False,
     magnitude_levels: int = 12,
 ) -> GradientData:
@@ -154,15 +155,22 @@ def compute_gradients(
 
     Args:
         image: Grayscale image array.
+        sigma: Standard deviation for Gaussian smoothing before Sobel filters.
         quantize_magnitude: If True, quantize the gradient magnitude.
         magnitude_levels: Number of levels for magnitude quantization.
 
     Returns:
         GradientData containing dx, dy, magnitude, and angle.
     """
+    # Smooth before Sobel to reduce noise sensitivity in gradient-based algorithms.
+    if sigma > 0:
+        smoothed = filters.gaussian(image, sigma=sigma)
+    else:
+        smoothed = image
+
     # Compute gradients using Sobel filters
-    dy = filters.sobel_h(image)
-    dx = filters.sobel_v(image)
+    dy = filters.sobel_h(smoothed)
+    dx = filters.sobel_v(smoothed)
 
     # Compute magnitude
     magnitude = np.sqrt(dx**2 + dy**2)

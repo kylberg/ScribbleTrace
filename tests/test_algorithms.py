@@ -69,6 +69,53 @@ class TestSpirals:
         # Without connect_cells, should have more individual paths
         assert len(paths) > 0
 
+    def test_spiral_samples_center_for_even_levels(self, processed_image):
+        """Even levels should include theta=0 to avoid center-bridge artifacts."""
+        config = SpiralsConfig(theta_resolution=50, connect_cells=False)
+        algo = Spirals(processed_image, config=config)
+
+        vertices = algo._vertices_on_spiral(2 * np.pi)
+        min_radius = min(np.hypot(x, y) for x, y in vertices)
+
+        assert min_radius < 1e-12
+
+    def test_spiral_direction_consistent_across_levels(self, processed_image):
+        """Connected spirals should always run left-to-right across levels."""
+        config = SpiralsConfig(theta_resolution=50, connect_cells=True)
+        algo = Spirals(processed_image, config=config)
+
+        # Check a few levels that historically flipped direction by parity.
+        for value in (1, 2, 3, 4):
+            verts = algo._process_cell(row=0, col=0, value=value)
+            assert verts[0][0] <= verts[-1][0]
+
+    def test_spiral_randomness_controls_affect_vertices(self, processed_image):
+        """Position and vertex randomness should perturb spiral geometry."""
+        base_cfg = SpiralsConfig(
+            theta_resolution=40,
+            randomness_vertex=0.0,
+            randomness_position=0.0,
+            connect_cells=False,
+        )
+        wiggly_cfg = SpiralsConfig(
+            theta_resolution=40,
+            randomness_vertex=0.1,
+            randomness_position=0.1,
+            connect_cells=False,
+        )
+
+        np.random.seed(123)
+        base_verts = Spirals(processed_image, config=base_cfg)._process_cell(row=2, col=3, value=3)
+
+        np.random.seed(123)
+        wiggly_verts = Spirals(processed_image, config=wiggly_cfg)._process_cell(row=2, col=3, value=3)
+
+        assert len(base_verts) == len(wiggly_verts)
+        assert any(
+            not np.allclose(base_point, wiggly_point)
+            for base_point, wiggly_point in zip(base_verts, wiggly_verts, strict=False)
+        )
+
 
 class TestCircles:
     """Tests for Circles algorithm."""
