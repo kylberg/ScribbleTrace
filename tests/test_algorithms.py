@@ -169,6 +169,55 @@ class TestLines:
         assert isinstance(paths, list)
         assert len(paths) > 0
 
+    def test_lines_follow_contours_not_gradients(self, processed_image, gradients):
+        """Line direction should be perpendicular to gradient direction."""
+        algo = Lines(processed_image, gradients=gradients)
+
+        r = processed_image.height // 2
+        c = processed_image.width // 2
+        dx = gradients.dx[r, c]
+        dy = gradients.dy[r, c]
+
+        grad_angle = np.arctan2(dy, dx)
+        line_angle = grad_angle - np.pi / 2
+
+        # Dot product between gradient and line direction should be ~0.
+        line_dir = np.array([np.cos(line_angle), np.sin(line_angle)])
+        grad_vec = np.array([dx, dy])
+        dot = float(np.dot(line_dir, grad_vec))
+
+        assert np.isclose(dot, 0.0, atol=1e-9)
+
+    def test_lines_segment_length_scales_line(self, processed_image, gradients):
+        """Segment length should scale generated line length."""
+        short_cfg = LinesConfig(
+            segment_length=0.5,
+            randomness_vertex=0.0,
+            randomness_position=0.0,
+            randomness_length=0.0,
+            min_gradient_scale=1.0,
+            max_gradient_scale=1.0,
+        )
+        long_cfg = LinesConfig(
+            segment_length=2.0,
+            randomness_vertex=0.0,
+            randomness_position=0.0,
+            randomness_length=0.0,
+            min_gradient_scale=1.0,
+            max_gradient_scale=1.0,
+        )
+
+        short_algo = Lines(processed_image, config=short_cfg, gradients=gradients)
+        long_algo = Lines(processed_image, config=long_cfg, gradients=gradients)
+
+        short_line = short_algo._generate_line(0.0, 0.0, 0.0, 1.0)
+        long_line = long_algo._generate_line(0.0, 0.0, 0.0, 4.0)
+
+        short_len = np.hypot(short_line[1][0] - short_line[0][0], short_line[1][1] - short_line[0][1])
+        long_len = np.hypot(long_line[1][0] - long_line[0][0], long_line[1][1] - long_line[0][1])
+
+        assert long_len > short_len
+
 
 class TestCurves:
     """Tests for Curves algorithm."""
@@ -187,6 +236,36 @@ class TestCurves:
 
         assert isinstance(paths, list)
         assert len(paths) > 0
+
+    def test_curves_segment_length_scales_trace_step(self, processed_image, gradients):
+        """Segment length should scale traced curve path extent."""
+        short_cfg = CurvesConfig(
+            segment_length=0.5,
+            max_steps=1,
+            step_size=2.0,
+            randomness_angle=0.0,
+            randomness_position=0.0,
+            bezier_samples=5,
+        )
+        long_cfg = CurvesConfig(
+            segment_length=2.0,
+            max_steps=1,
+            step_size=2.0,
+            randomness_angle=0.0,
+            randomness_position=0.0,
+            bezier_samples=5,
+        )
+
+        short_algo = Curves(processed_image, config=short_cfg, gradients=gradients)
+        long_algo = Curves(processed_image, config=long_cfg, gradients=gradients)
+
+        short_path = short_algo._trace_gradient_path(5.0, 5.0, 10.0)
+        long_path = long_algo._trace_gradient_path(5.0, 5.0, 10.0)
+
+        short_extent = max(np.hypot(x - 5.0, y - 5.0) for x, y in short_path)
+        long_extent = max(np.hypot(x - 5.0, y - 5.0) for x, y in long_path)
+
+        assert long_extent > short_extent
 
 
 class TestHatching:

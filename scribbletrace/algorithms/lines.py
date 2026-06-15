@@ -21,6 +21,7 @@ class LinesConfig(AlgorithmConfig):
     """Configuration for the Lines algorithm.
 
     Attributes:
+        segment_length: Base multiplier for line segment length.
         randomness_length: Amount of random variation in line length.
         min_gradient_scale: Minimum line scale based on gradient.
         max_gradient_scale: Maximum line scale based on gradient.
@@ -28,6 +29,7 @@ class LinesConfig(AlgorithmConfig):
 
     randomness_vertex: float = 0.1
     randomness_position: float = 0.5
+    segment_length: float = 1.0
     randomness_length: float = 0.0
     min_gradient_scale: float = 0.1
     max_gradient_scale: float = 10.0
@@ -125,7 +127,7 @@ class Lines(Algorithm):
             return paths
 
         # Scale line length by gradient magnitude
-        length = max(cfg.min_gradient_scale, grad_mag * cfg.max_gradient_scale)
+        length = cfg.segment_length * max(cfg.min_gradient_scale, grad_mag * cfg.max_gradient_scale)
 
         # Apply length randomness
         if cfg.randomness_length > 0:
@@ -165,7 +167,9 @@ class Lines(Algorithm):
                 # Get gradient info at this position
                 dx = self.gradients.dx[r, c]
                 dy = self.gradients.dy[r, c]
-                angle = np.arctan2(dx, dy)  # Note: perpendicular orientation
+                grad_angle = np.arctan2(dy, dx)
+                # Draw along image contours (isophotes): perpendicular to gradient.
+                angle = grad_angle - np.pi / 2
                 grad_mag = dx * dx + dy * dy
 
                 cell_paths = self._process_cell(r, c, value, angle, grad_mag)

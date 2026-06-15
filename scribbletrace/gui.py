@@ -242,7 +242,8 @@ def get_default_gui_image() -> np.ndarray | None:
     """Load the default GUI image if available, otherwise return None."""
     if DEFAULT_IMAGE_PATH.exists():
         try:
-            return load_image(DEFAULT_IMAGE_PATH)
+            # Keep the input preview as the original image (including color).
+            return np.array(Image.open(DEFAULT_IMAGE_PATH).convert("RGB"))
         except Exception:  # noqa: BLE001
             return None
     return None
@@ -369,6 +370,58 @@ def resolve_svg_theme(color_theme: str) -> tuple[str, str]:
     return ("black", "white")
 
 
+def estimate_vertex_count(
+    processed: ProcessedImage,
+    algorithm: str,
+    theta_resolution: int,
+    circle_points: int,
+    max_steps: int,
+    bezier_samples: int,
+    hatch_horizontal: bool,
+    hatch_vertical: bool,
+    hatch_diag_right: bool,
+    hatch_diag_left: bool,
+    min_spacing: float,
+) -> int:
+    """Estimate vertex count for safety/preview purposes."""
+    data = processed.data.astype(int)
+    intensity_sum = int(np.sum(data))
+    h, w = data.shape
+    cells = int(h * w)
+
+    if algorithm == "spirals":
+        values = data.ravel()
+        zeros = int(np.sum(values == 0))
+        nonzero = values[values > 0]
+
+        # n ~= theta_resolution * value / 2 (odd-forced sample count).
+        nz_vertices = np.maximum(3, np.round(theta_resolution * nonzero / 2.0).astype(int))
+        nz_vertices = nz_vertices + (nz_vertices % 2 == 0)
+        return int(zeros * theta_resolution + int(np.sum(nz_vertices)))
+
+    if algorithm == "circles":
+        return int(intensity_sum * (circle_points + 1))
+
+    if algorithm == "squares":
+        return int(intensity_sum * 5)
+
+    if algorithm == "lines":
+        return int(intensity_sum * 2)
+
+    if algorithm == "curves":
+        return int(max(1, intensity_sum) * max(3, max_steps * max(2, bezier_samples // 2)))
+
+    if algorithm == "hatching":
+        directions = sum([hatch_horizontal, hatch_vertical, hatch_diag_right, hatch_diag_left])
+        directions = max(1, directions)
+        spacing = max(0.1, float(min_spacing))
+        lines_est = ((w + h) / spacing) * directions
+        verts_per_line = max(w, h)
+        return int(lines_est * verts_per_line)
+
+    return int(cells)
+
+
 def generate_svg_content(
     processed: ProcessedImage,
     gradients,
@@ -388,9 +441,11 @@ def generate_svg_content(
     hatch_diag_left: bool,
     min_spacing: float,
     max_spacing: float,
+    lines_segment_length: float,
     randomness_length: float,
     min_gradient_scale: float,
     max_gradient_scale: float,
+    curves_segment_length: float,
     max_steps: int,
     step_size: float,
     bezier_samples: int,
@@ -431,6 +486,7 @@ def generate_svg_content(
             randomness_vertex=randomness_vertex,
             randomness_position=randomness_position,
             stroke_width=stroke_width,
+            segment_length=lines_segment_length,
             randomness_length=randomness_length,
             min_gradient_scale=min_gradient_scale,
             max_gradient_scale=max_gradient_scale,
@@ -442,6 +498,7 @@ def generate_svg_content(
             randomness_vertex=randomness_vertex,
             randomness_position=randomness_position,
             stroke_width=stroke_width,
+            segment_length=curves_segment_length,
             max_steps=max_steps,
             step_size=step_size,
             bezier_samples=bezier_samples,
@@ -511,10 +568,12 @@ def process_image(
     min_spacing: float,
     max_spacing: float,
     # Lines parameters
+    lines_segment_length: float,
     randomness_length: float,
     min_gradient_scale: float,
     max_gradient_scale: float,
     # Curves parameters
+    curves_segment_length: float,
     max_steps: int,
     step_size: float,
     bezier_samples: int,
@@ -556,9 +615,11 @@ def process_image(
         hatch_diag_left,
         min_spacing,
         max_spacing,
+        lines_segment_length,
         randomness_length,
         min_gradient_scale,
         max_gradient_scale,
+        curves_segment_length,
         max_steps,
         step_size,
         bezier_samples,
@@ -596,12 +657,16 @@ def run_pipeline_to_stage(
     hatch_diag_left: bool,
     min_spacing: float,
     max_spacing: float,
+    lines_segment_length: float,
     randomness_length: float,
     min_gradient_scale: float,
     max_gradient_scale: float,
+    curves_segment_length: float,
     max_steps: int,
     step_size: float,
     bezier_samples: int,
+    enable_vertex_guard: bool,
+    max_estimated_vertices: float,
 ) -> tuple[
     Image.Image | None,
     str,
@@ -610,6 +675,7 @@ def run_pipeline_to_stage(
     np.ndarray | None,
     np.ndarray | None,
     np.ndarray | None,
+    str,
     str,
     dict[str, Any],
 ]:
@@ -624,13 +690,13 @@ def run_pipeline_to_stage(
     else:
         cache["grayscale"] = grayscale
 
-    step1_image = 1.0 - grayscale if invert else grayscale
-    grayscale_display = to_display_uint8(step1_image)
+    grayscale_display = to_display_uint8(grayscale)
     preview_shape = grayscale_display.shape
 
     downscaled_display = None
     quantized_display = None
     gradient_display = None
+    complexity_text = "Estimated vertices: -"
 
     processed: ProcessedImage | None = None
     gradients = None
@@ -644,8 +710,10 @@ def run_pipeline_to_stage(
             cache["svg_by_key"] = {}
         processed = cache["processed"]
         resized_inverted = 1.0 - processed.original if invert else processed.original
-        downscaled_display = to_display_uint8(resized_inverted)
-        downscaled_display = resize_preview_nearest(downscaled_display, preview_shape)
+        step1_display = to_display_uint8(resized_inverted)
+        step1_display = resize_preview_nearest(step1_display, preview_shape)
+        grayscale_display = step1_display
+        downscaled_display = step1_display
 
     if target_stage_index >= 0 and processed is not None:
         quantized_display = to_display_uint8(processed.data, levels=processed.levels)
@@ -668,6 +736,39 @@ def run_pipeline_to_stage(
     if target_stage_index >= 2:
         if processed is None:
             processed = preprocess(grayscale, output_width=output_width, levels=levels, invert=invert)
+
+        estimated_vertices = estimate_vertex_count(
+            processed,
+            algorithm,
+            theta_resolution,
+            circle_points,
+            max_steps,
+            bezier_samples,
+            hatch_horizontal,
+            hatch_vertical,
+            hatch_diag_right,
+            hatch_diag_left,
+            min_spacing,
+        )
+        complexity_text = f"Estimated vertices: {estimated_vertices:,}"
+
+        if enable_vertex_guard and estimated_vertices > int(max_estimated_vertices):
+            status = (
+                f"Skipped final SVG at {PIPELINE_STEP_LABELS[target_stage_index]}: "
+                f"estimate {estimated_vertices:,} > limit {int(max_estimated_vertices):,}"
+            )
+            return (
+                None,
+                "",
+                gr.update(value=None, interactive=False),
+                gradient_display,
+                grayscale_display,
+                downscaled_display,
+                quantized_display,
+                complexity_text,
+                status,
+                cache,
+            )
 
         sigma_key = round(float(gradient_sigma), 4)
         gradients_by_sigma = cache.setdefault("gradients_by_sigma", {})
@@ -693,9 +794,11 @@ def run_pipeline_to_stage(
             bool(hatch_diag_left),
             float(min_spacing),
             float(max_spacing),
+            float(lines_segment_length),
             float(randomness_length),
             float(min_gradient_scale),
             float(max_gradient_scale),
+            float(curves_segment_length),
             int(max_steps),
             float(step_size),
             int(bezier_samples),
@@ -723,9 +826,11 @@ def run_pipeline_to_stage(
                 hatch_diag_left,
                 min_spacing,
                 max_spacing,
+                lines_segment_length,
                 randomness_length,
                 min_gradient_scale,
                 max_gradient_scale,
+                curves_segment_length,
                 max_steps,
                 step_size,
                 bezier_samples,
@@ -776,6 +881,7 @@ def run_pipeline_to_stage(
         grayscale_display,
         downscaled_display,
         quantized_display,
+        complexity_text,
         status,
         cache,
     )
@@ -894,6 +1000,21 @@ def create_gui() -> gr.Blocks:
                 label="Stroke Width (mm)",
             )
 
+            with gr.Accordion("Safety Limits", open=False):
+                enable_vertex_guard = gr.Checkbox(
+                    value=True,
+                    label="Prevent Overly Large SVG Jobs",
+                    info="Skips rendering when estimated vertices exceed the limit",
+                )
+                max_estimated_vertices = gr.Slider(
+                    minimum=50000,
+                    maximum=5000000,
+                    value=900000,
+                    step=50000,
+                    label="Max Estimated Vertices",
+                )
+                complexity_status = gr.Markdown("Estimated vertices: -")
+
             with gr.Accordion("Shared Randomness", open=False):
                 randomness_vertex = gr.Slider(
                     minimum=0.0,
@@ -950,6 +1071,13 @@ def create_gui() -> gr.Blocks:
                 )
 
             with gr.Accordion("Lines Settings", open=False, visible=False) as lines_accordion:
+                lines_segment_length = gr.Slider(
+                    minimum=0.1,
+                    maximum=5.0,
+                    value=1.0,
+                    step=0.1,
+                    label="Segment Length",
+                )
                 randomness_length = gr.Slider(
                     minimum=0.0,
                     maximum=1.0,
@@ -973,6 +1101,13 @@ def create_gui() -> gr.Blocks:
                 )
 
             with gr.Accordion("Curves Settings", open=False, visible=False) as curves_accordion:
+                curves_segment_length = gr.Slider(
+                    minimum=0.1,
+                    maximum=5.0,
+                    value=1.0,
+                    step=0.1,
+                    label="Segment Length",
+                )
                 max_steps = gr.Slider(
                     minimum=1,
                     maximum=20,
@@ -1094,12 +1229,16 @@ def create_gui() -> gr.Blocks:
             hatch_dl,
             min_sp,
             max_sp,
+            line_seg_len,
             rand_len,
             min_grad,
             max_grad,
+            curve_seg_len,
             m_steps,
             s_size,
             bez_samp,
+            guard_enabled,
+            max_vertices,
         ):
             return run_pipeline_to_stage(
                 cache,
@@ -1125,12 +1264,16 @@ def create_gui() -> gr.Blocks:
                 hatch_dl,
                 min_sp,
                 max_sp,
+                line_seg_len,
                 rand_len,
                 min_grad,
                 max_grad,
+                curve_seg_len,
                 m_steps,
                 s_size,
                 bez_samp,
+                guard_enabled,
+                max_vertices,
             )
 
         def run_step(current_stage, *params):
@@ -1183,12 +1326,16 @@ def create_gui() -> gr.Blocks:
             hatch_diag_left,
             min_spacing,
             max_spacing,
+            lines_segment_length,
             randomness_length,
             min_gradient_scale,
             max_gradient_scale,
+            curves_segment_length,
             max_steps,
             step_size,
             bezier_samples,
+            enable_vertex_guard,
+            max_estimated_vertices,
         ]
 
         pipeline_outputs = [
@@ -1199,6 +1346,7 @@ def create_gui() -> gr.Blocks:
             grayscale_output,
             downscaled_output,
             quantized_output,
+            complexity_status,
             pipeline_status,
         ]
 
@@ -1223,12 +1371,16 @@ def create_gui() -> gr.Blocks:
             "hatch_diag_left",
             "min_spacing",
             "max_spacing",
+            "lines_segment_length",
             "randomness_length",
             "min_gradient_scale",
             "max_gradient_scale",
+            "curves_segment_length",
             "max_steps",
             "step_size",
             "bezier_samples",
+            "enable_vertex_guard",
+            "max_estimated_vertices",
         ]
 
         setting_components = [
@@ -1252,12 +1404,16 @@ def create_gui() -> gr.Blocks:
             hatch_diag_left,
             min_spacing,
             max_spacing,
+            lines_segment_length,
             randomness_length,
             min_gradient_scale,
             max_gradient_scale,
+            curves_segment_length,
             max_steps,
             step_size,
             bezier_samples,
+            enable_vertex_guard,
+            max_estimated_vertices,
         ]
 
         def create_preset_file(*settings):
