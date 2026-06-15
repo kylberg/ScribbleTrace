@@ -23,6 +23,7 @@ class CurvesConfig(AlgorithmConfig):
         max_steps: Maximum number of steps in each direction.
         step_size: Distance to travel per step.
         segment_length: Base multiplier for traced segment length.
+        randomness_length: Random variation in traced segment length.
         randomness_angle: Random variation in step direction.
         bezier_samples: Number of points to sample on the Bézier curve.
         gradient_mag_levels: Quantization levels for gradient magnitude.
@@ -31,6 +32,7 @@ class CurvesConfig(AlgorithmConfig):
     max_steps: int = 4
     step_size: float = 2.0
     segment_length: float = 1.0
+    randomness_length: float = 0.0
     randomness_angle: float = 0.01
     randomness_position: float = 0.5
     bezier_samples: int = 15
@@ -82,6 +84,8 @@ class Curves(Algorithm):
         # Calculate number of steps based on gradient magnitude
         step_count = int(min(cfg.max_steps, grad_mag))
         step_length = cfg.segment_length * min(cfg.step_size, grad_mag / 10)
+        if cfg.randomness_length > 0:
+            step_length *= self.random_scale(1.0, cfg.randomness_length)
 
         if step_count <= 0:
             return path_forward

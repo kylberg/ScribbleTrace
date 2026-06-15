@@ -267,6 +267,39 @@ class TestCurves:
 
         assert long_extent > short_extent
 
+    def test_curves_length_randomness_changes_trace(self, processed_image, gradients):
+        """Length randomness should perturb traced curve points."""
+        base_cfg = CurvesConfig(
+            segment_length=1.0,
+            randomness_length=0.0,
+            max_steps=2,
+            step_size=2.0,
+            randomness_angle=0.0,
+            randomness_position=0.0,
+            bezier_samples=5,
+        )
+        rand_cfg = CurvesConfig(
+            segment_length=1.0,
+            randomness_length=0.5,
+            max_steps=2,
+            step_size=2.0,
+            randomness_angle=0.0,
+            randomness_position=0.0,
+            bezier_samples=5,
+        )
+
+        np.random.seed(123)
+        base_path = Curves(processed_image, config=base_cfg, gradients=gradients)._trace_gradient_path(5.0, 5.0, 10.0)
+
+        np.random.seed(123)
+        rand_path = Curves(processed_image, config=rand_cfg, gradients=gradients)._trace_gradient_path(5.0, 5.0, 10.0)
+
+        assert len(base_path) == len(rand_path)
+        assert any(
+            not np.allclose(a, b)
+            for a, b in zip(base_path, rand_path, strict=False)
+        )
+
 
 class TestHatching:
     """Tests for Hatching algorithm."""
