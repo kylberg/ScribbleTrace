@@ -41,6 +41,176 @@ from scribbletrace.algorithms import (
 # Default sample image (a simple gradient for testing)
 DEFAULT_IMAGE = None
 
+HUB_THEME_ID = "Nymbo/Nymbo_Theme"
+
+# Legacy custom CSS kept for reference, but not applied when using hub themes.
+VSCODE_DARK_CSS = """
+:root {
+    --vsc-bg: #1e1e1e;
+    --vsc-panel: #252526;
+    --vsc-panel-elev: #2d2d30;
+    --vsc-border: #3c3c3c;
+    --vsc-text: #d4d4d4;
+    --vsc-muted: #9da0a6;
+    --vsc-accent: #007acc;
+    --vsc-accent-strong: #1592ff;
+    --vsc-success: #4ec9b0;
+
+    /* Override Gradio theme tokens that default to indigo/purple. */
+    --color-accent: #007acc;
+    --color-accent-soft: #17354d;
+    --background-fill-secondary: #252526;
+    --block-background-fill: #252526;
+    --block-border-color: #3c3c3c;
+    --block-label-background-fill: #252526;
+    --block-label-border-color: #3c3c3c;
+    --block-title-text-color: #d4d4d4;
+}
+
+body,
+.gradio-container {
+    background:
+        radial-gradient(1100px 520px at 8% -12%, rgba(0, 122, 204, 0.16) 0%, transparent 58%),
+        radial-gradient(900px 420px at 92% -15%, rgba(21, 146, 255, 0.1) 0%, transparent 52%),
+        var(--vsc-bg);
+    color: var(--vsc-text);
+}
+
+.gradio-container {
+    max-width: 1400px !important;
+}
+
+.gradio-container h1,
+.gradio-container h2,
+.gradio-container h3,
+.gradio-container label,
+.gradio-container p,
+.gradio-container span,
+.gradio-container .prose {
+    color: var(--vsc-text) !important;
+}
+
+.gradio-container .gr-block,
+.gradio-container .block,
+.gradio-container .panel,
+.gradio-container .tabs,
+.gradio-container .tabitem {
+    background: color-mix(in srgb, var(--vsc-panel) 92%, black 8%) !important;
+    border: 1px solid color-mix(in srgb, var(--vsc-border) 88%, var(--vsc-accent) 12%) !important;
+    border-radius: 12px !important;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28);
+}
+
+/* Subsection containers (accordions) */
+.gradio-container .gr-accordion,
+.gradio-container .accordion,
+.gradio-container .accordion-header,
+.gradio-container .accordion-content {
+    background: color-mix(in srgb, var(--vsc-panel) 90%, black 10%) !important;
+    border-color: color-mix(in srgb, var(--vsc-border) 82%, var(--vsc-accent) 18%) !important;
+    color: var(--vsc-text) !important;
+}
+
+.gradio-container .accordion-header:hover,
+.gradio-container .accordion-header:focus {
+    background: color-mix(in srgb, var(--vsc-panel-elev) 88%, var(--vsc-accent) 12%) !important;
+}
+
+.gradio-container .gr-button-primary,
+.gradio-container button.primary {
+    background: linear-gradient(135deg, var(--vsc-accent), var(--vsc-accent-strong)) !important;
+    color: #ffffff !important;
+    border: 0 !important;
+    font-weight: 700;
+}
+
+.gradio-container .gr-button-primary:hover,
+.gradio-container button.primary:hover {
+    filter: brightness(1.08);
+}
+
+.gradio-container .gr-button-secondary,
+.gradio-container button.secondary {
+    background: color-mix(in srgb, var(--vsc-panel-elev) 85%, black 15%) !important;
+    color: var(--vsc-text) !important;
+    border: 1px solid color-mix(in srgb, var(--vsc-border) 70%, var(--vsc-accent) 30%) !important;
+}
+
+.gradio-container input,
+.gradio-container textarea,
+.gradio-container select,
+.gradio-container .wrap {
+    background: color-mix(in srgb, var(--vsc-panel-elev) 92%, black 8%) !important;
+    color: var(--vsc-text) !important;
+    border-color: color-mix(in srgb, var(--vsc-border) 85%, var(--vsc-accent) 15%) !important;
+}
+
+.gradio-container input:focus,
+.gradio-container textarea:focus,
+.gradio-container select:focus {
+    outline: 1px solid var(--vsc-accent) !important;
+    box-shadow: 0 0 0 2px rgba(0, 122, 204, 0.25) !important;
+}
+
+.gradio-container .tab-nav button.selected,
+.gradio-container [role="tab"][aria-selected="true"] {
+    color: var(--vsc-accent-strong) !important;
+    border-color: var(--vsc-accent) !important;
+}
+
+.gradio-container .gr-markdown a {
+    color: var(--vsc-accent-strong) !important;
+}
+
+.gradio-container .gr-markdown strong {
+    color: var(--vsc-success) !important;
+}
+
+/* Slider styling: remove default purple and align with blue accents */
+.gradio-container input[type="range"] {
+    accent-color: var(--vsc-accent) !important;
+}
+
+.gradio-container input[type="range"]::-webkit-slider-runnable-track {
+    background: linear-gradient(90deg, color-mix(in srgb, var(--vsc-accent) 55%, #0b2538 45%), #1f2a36) !important;
+    height: 6px;
+    border-radius: 999px;
+}
+
+.gradio-container input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: -4px;
+    border-radius: 50%;
+    background: var(--vsc-accent-strong) !important;
+    border: 2px solid #0f111a;
+    box-shadow: 0 0 0 2px rgba(0, 122, 204, 0.25);
+}
+
+.gradio-container input[type="range"]::-moz-range-track {
+    background: linear-gradient(90deg, color-mix(in srgb, var(--vsc-accent) 55%, #0b2538 45%), #1f2a36) !important;
+    height: 6px;
+    border-radius: 999px;
+}
+
+.gradio-container input[type="range"]::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--vsc-accent-strong) !important;
+    border: 2px solid #0f111a;
+    box-shadow: 0 0 0 2px rgba(0, 122, 204, 0.25);
+}
+
+@media (max-width: 900px) {
+    .gradio-container {
+        padding: 8px !important;
+    }
+}
+"""
+
 
 def create_sample_image() -> np.ndarray:
     """Create a simple gradient sample image for testing."""
@@ -120,11 +290,11 @@ def process_image(
     max_steps: int,
     step_size: float,
     bezier_samples: int,
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, np.ndarray]:
     """Process image with selected algorithm and parameters.
 
     Returns:
-        Tuple of (SVG content string, path to temp SVG file for download).
+        Tuple of (SVG content string, path to temp SVG file for download, gradient magnitude image).
     """
     if input_image is None:
         input_image = create_sample_image()
@@ -264,7 +434,7 @@ def process_image(
         f.write(svg_content)
         temp_path = f.name
 
-    return svg_content, temp_path
+    return svg_content, temp_path, gradients.magnitude
 
 
 def create_gui() -> gr.Blocks:
@@ -272,7 +442,6 @@ def create_gui() -> gr.Blocks:
 
     with gr.Blocks(
         title="ScribbleTrace - Interactive Parameter Explorer",
-        theme=gr.themes.Soft(),
     ) as app:
         gr.Markdown(
             """
@@ -323,10 +492,10 @@ def create_gui() -> gr.Blocks:
                         info="Dark areas produce more marks",
                     )
                     stroke_width = gr.Slider(
-                        minimum=0.1,
+                        minimum=0.01,
                         maximum=2.0,
                         value=0.5,
-                        step=0.1,
+                        step=0.01,
                         label="Stroke Width (mm)",
                     )
 
@@ -484,6 +653,12 @@ def create_gui() -> gr.Blocks:
                             language="html",
                             lines=20,
                         )
+                    with gr.TabItem("Gradient Magnitude"):
+                        gradient_output = gr.Image(
+                            label="Gradient Magnitude",
+                            type="numpy",
+                            interactive=False,
+                        )
 
                 download_btn = gr.DownloadButton(
                     "Download SVG",
@@ -518,7 +693,7 @@ def create_gui() -> gr.Blocks:
             rand_len, min_grad, max_grad,
             m_steps, s_size, bez_samp,
         ):
-            svg_content, temp_path = process_image(
+            svg_content, temp_path, gradient_magnitude = process_image(
                 img, algo, width, lvls, inv, stroke, rand_v, rand_p,
                 theta_res, spiral_growth, connect,
                 circ_pts, sm_first,
@@ -526,6 +701,12 @@ def create_gui() -> gr.Blocks:
                 rand_len, min_grad, max_grad,
                 m_steps, s_size, bez_samp,
             )
+
+            # Only show gradient magnitude for algorithms that use it directly.
+            if algo in {"lines", "curves", "hatching"}:
+                gradient_display = np.clip(gradient_magnitude * 255.0, 0, 255).astype(np.uint8)
+            else:
+                gradient_display = None
 
             # Scale SVG to fill panel width while preserving aspect ratio
             import re
@@ -559,7 +740,7 @@ def create_gui() -> gr.Blocks:
             </div>
             """
 
-            return html_preview, svg_content, gr.update(value=temp_path, interactive=True)
+            return html_preview, svg_content, gr.update(value=temp_path, interactive=True), gradient_display
 
         # Collect all inputs
         all_inputs = [
@@ -693,7 +874,7 @@ def create_gui() -> gr.Blocks:
         generate_btn.click(
             fn=on_generate,
             inputs=all_inputs,
-            outputs=[svg_output, svg_code, download_btn],
+            outputs=[svg_output, svg_code, download_btn, gradient_output],
         )
 
         # Auto-generate on parameter changes (with debounce via queue)
@@ -702,14 +883,14 @@ def create_gui() -> gr.Blocks:
                 component.change(
                     fn=on_generate,
                     inputs=all_inputs,
-                    outputs=[svg_output, svg_code, download_btn],
+                    outputs=[svg_output, svg_code, download_btn, gradient_output],
                 )
 
         # Initial generation when image is uploaded
         input_image.change(
             fn=on_generate,
             inputs=all_inputs,
-            outputs=[svg_output, svg_code, download_btn],
+            outputs=[svg_output, svg_code, download_btn, gradient_output],
         )
 
         save_preset_btn.click(
@@ -739,7 +920,9 @@ def main():
     """Launch the GUI."""
     app = create_gui()
     app.queue()  # Enable queuing for better handling of rapid changes
+    theme = gr.themes.ThemeClass.from_hub(HUB_THEME_ID)
     app.launch(
+        theme=theme,
         share=False,
         inbrowser=True,
         show_error=True,
