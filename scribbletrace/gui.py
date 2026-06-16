@@ -378,6 +378,75 @@ def resolve_svg_theme(color_theme: str) -> tuple[str, str]:
     return ("black", "white")
 
 
+def _normalize_histogram_knots(h_min: float, h_mid: float, h_max: float) -> tuple[float, float, float]:
+    """Return safe, ordered histogram transform knot positions in [0, 1]."""
+    min_v = float(np.clip(h_min, 0.0, 1.0))
+    mid_v = float(np.clip(h_mid, 0.0, 1.0))
+    max_v = float(np.clip(h_max, 0.0, 1.0))
+
+    eps = 1e-4
+    if min_v > max_v:
+        min_v, max_v = max_v, min_v
+    mid_v = min(max(mid_v, min_v + eps), max_v - eps)
+    if max_v - min_v < 2 * eps:
+        min_v = max(0.0, min_v - eps)
+        max_v = min(1.0, max_v + eps)
+        mid_v = (min_v + max_v) / 2
+
+    return min_v, mid_v, max_v
+
+
+def apply_histogram_transform(
+    image: np.ndarray,
+    hist_min: float,
+    hist_mid: float,
+    hist_max: float,
+) -> np.ndarray:
+    """Apply a three-knot tonal transform (min->0, mid->0.5, max->1)."""
+    min_v, mid_v, max_v = _normalize_histogram_knots(hist_min, hist_mid, hist_max)
+    in_levels = np.array([min_v, mid_v, max_v], dtype=np.float64)
+    out_levels = np.array([0.0, 0.5, 1.0], dtype=np.float64)
+    transformed = np.interp(np.asarray(image, dtype=np.float64), in_levels, out_levels)
+    return np.clip(transformed, 0.0, 1.0)
+
+
+def render_histogram_preview(
+    image: np.ndarray,
+    hist_min: float,
+    hist_mid: float,
+    hist_max: float,
+    bins: int = 128,
+    width: int = 720,
+    height: int = 220,
+) -> np.ndarray:
+    """Render a simple histogram preview with vertical marker lines."""
+    values = np.clip(np.asarray(image, dtype=np.float64).ravel(), 0.0, 1.0)
+    counts, _ = np.histogram(values, bins=bins, range=(0.0, 1.0))
+    max_count = max(1, int(counts.max()))
+
+    canvas = np.full((height, width, 3), 255, dtype=np.uint8)
+
+    for idx, count in enumerate(counts):
+        x0 = int(idx * width / bins)
+        x1 = int((idx + 1) * width / bins)
+        bar_h = int((count / max_count) * (height - 24))
+        y0 = height - 1
+        y1 = max(0, y0 - bar_h)
+        canvas[y1:y0, x0:max(x0 + 1, x1), :] = 40
+
+    min_v, mid_v, max_v = _normalize_histogram_knots(hist_min, hist_mid, hist_max)
+    markers = [
+        (min_v, np.array([230, 57, 70], dtype=np.uint8)),
+        (mid_v, np.array([241, 160, 17], dtype=np.uint8)),
+        (max_v, np.array([69, 123, 157], dtype=np.uint8)),
+    ]
+    for pos, color in markers:
+        x = int(np.clip(round(pos * (width - 1)), 0, width - 1))
+        canvas[:, max(0, x - 1):min(width, x + 2), :] = color
+
+    return canvas
+
+
 def estimate_vertex_count(
     processed: ProcessedImage,
     algorithm: str,
@@ -651,6 +720,8 @@ def run_pipeline_to_stage(
     target_stage_index: int,
     algorithm: str,
     color_theme: str,
+    hist_range: list[float] | tuple[float, float],
+    hist_mid: float,
     output_width: float,
     levels: int,
     invert: bool,
@@ -688,6 +759,7 @@ def run_pipeline_to_stage(
     np.ndarray | None,
     np.ndarray | None,
     np.ndarray | None,
+    np.ndarray | None,
     str,
     str,
     dict[str, Any],
@@ -696,12 +768,23 @@ def run_pipeline_to_stage(
     cache = pipeline_cache if isinstance(pipeline_cache, dict) else {}
     target_stage_index = int(np.clip(target_stage_index, 0, len(PIPELINE_STEP_LABELS) - 1))
 
-    grayscale = normalize_input_image(input_image)
-    image_key = image_signature(grayscale)
+    hist_min = 0.0
+    hist_max = 1.0
+    if isinstance(hist_range, (list, tuple)) and len(hist_range) == 2:
+        hist_min = float(hist_range[0])
+        hist_max = float(hist_range[1])
+
+    hist_min, hist_mid, hist_max = _normalize_histogram_knots(hist_min, hist_mid, hist_max)
+
+    grayscale_original = normalize_input_image(input_image)
+    grayscale = apply_histogram_transform(grayscale_original, hist_min, hist_mid, hist_max)
+    image_key = image_signature(grayscale_original)
     if cache.get("image_key") != image_key:
-        cache = {"image_key": image_key, "grayscale": grayscale}
+        cache = {"image_key": image_key, "grayscale": grayscale_original}
     else:
-        cache["grayscale"] = grayscale
+        cache["grayscale"] = grayscale_original
+
+    hist_preview = render_histogram_preview(grayscale_original, hist_min, hist_mid, hist_max)
 
     grayscale_display = to_display_uint8(grayscale)
     preview_shape = grayscale_display.shape
@@ -715,7 +798,14 @@ def run_pipeline_to_stage(
     gradients = None
 
     if target_stage_index >= 0:
-        processed_key = (float(output_width), int(levels), bool(invert))
+        processed_key = (
+            float(output_width),
+            int(levels),
+            bool(invert),
+            round(float(hist_min), 6),
+            round(float(hist_mid), 6),
+            round(float(hist_max), 6),
+        )
         if cache.get("processed_key") != processed_key:
             cache["processed"] = preprocess(grayscale, output_width=output_width, levels=levels, invert=invert)
             cache["processed_key"] = processed_key
@@ -778,6 +868,7 @@ def run_pipeline_to_stage(
                 grayscale_display,
                 downscaled_display,
                 quantized_display,
+                hist_preview,
                 complexity_text,
                 status,
                 cache,
@@ -896,6 +987,7 @@ def run_pipeline_to_stage(
         grayscale_display,
         downscaled_display,
         quantized_display,
+        hist_preview,
         complexity_text,
         status,
         cache,
@@ -960,6 +1052,27 @@ def create_gui() -> gr.Blocks:
                 step=1,
                 label="Intensity Levels",
                 info="Number of quantization levels",
+            )
+            histogram_output = gr.Image(
+                label="Histogram + Transform Markers",
+                type="numpy",
+                interactive=False,
+            )
+            hist_range = gr.Slider(
+                minimum=0.0,
+                maximum=1.0,
+                value=[0.0, 1.0],
+                step=0.01,
+                label="Histogram Range (Min / Max)",
+                info="Drag both handles to set black and white points",
+            )
+            hist_mid = gr.Slider(
+                minimum=0.0,
+                maximum=1.0,
+                value=0.5,
+                step=0.01,
+                label="Histogram Midpoint",
+                info="Controls the midtone mapping between min and max",
             )
             run_gray_btn = gr.Button("Play Until Here", variant="secondary")
             grayscale_output = gr.Image(
@@ -1234,6 +1347,8 @@ def create_gui() -> gr.Blocks:
             img,
             algo,
             theme,
+            h_range,
+            h_mid,
             width,
             lvls,
             inv,
@@ -1270,6 +1385,8 @@ def create_gui() -> gr.Blocks:
                 target_stage_idx,
                 algo,
                 theme,
+                h_range,
+                h_mid,
                 width,
                 lvls,
                 inv,
@@ -1333,6 +1450,8 @@ def create_gui() -> gr.Blocks:
             input_image,
             algorithm,
             color_theme,
+            hist_range,
+            hist_mid,
             output_width,
             levels,
             invert,
@@ -1372,6 +1491,7 @@ def create_gui() -> gr.Blocks:
             grayscale_output,
             downscaled_output,
             quantized_output,
+            histogram_output,
             complexity_status,
             pipeline_status,
         ]
@@ -1379,6 +1499,8 @@ def create_gui() -> gr.Blocks:
         setting_keys = [
             "algorithm",
             "color_theme",
+            "hist_range",
+            "hist_mid",
             "output_width",
             "levels",
             "gradient_sigma",
@@ -1413,6 +1535,8 @@ def create_gui() -> gr.Blocks:
         setting_components = [
             algorithm,
             color_theme,
+            hist_range,
+            hist_mid,
             output_width,
             levels,
             gradient_sigma,
