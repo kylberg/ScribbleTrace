@@ -720,8 +720,9 @@ def run_pipeline_to_stage(
     target_stage_index: int,
     algorithm: str,
     color_theme: str,
-    hist_range: list[float] | tuple[float, float],
+    hist_min: float,
     hist_mid: float,
+    hist_max: float,
     output_width: float,
     levels: int,
     invert: bool,
@@ -767,12 +768,6 @@ def run_pipeline_to_stage(
     """Run the image pipeline up to a target stage and return GUI-ready outputs."""
     cache = pipeline_cache if isinstance(pipeline_cache, dict) else {}
     target_stage_index = int(np.clip(target_stage_index, 0, len(PIPELINE_STEP_LABELS) - 1))
-
-    hist_min = 0.0
-    hist_max = 1.0
-    if isinstance(hist_range, (list, tuple)) and len(hist_range) == 2:
-        hist_min = float(hist_range[0])
-        hist_max = float(hist_range[1])
 
     hist_min, hist_mid, hist_max = _normalize_histogram_knots(hist_min, hist_mid, hist_max)
 
@@ -1058,14 +1053,21 @@ def create_gui() -> gr.Blocks:
                 type="numpy",
                 interactive=False,
             )
-            hist_range = gr.Slider(
-                minimum=0.0,
-                maximum=1.0,
-                value=[0.0, 1.0],
-                step=0.01,
-                label="Histogram Range (Min / Max)",
-                info="Drag both handles to set black and white points",
-            )
+            with gr.Row():
+                hist_min = gr.Slider(
+                    minimum=0.0,
+                    maximum=1.0,
+                    value=0.0,
+                    step=0.01,
+                    label="Histogram Min",
+                )
+                hist_max = gr.Slider(
+                    minimum=0.0,
+                    maximum=1.0,
+                    value=1.0,
+                    step=0.01,
+                    label="Histogram Max",
+                )
             hist_mid = gr.Slider(
                 minimum=0.0,
                 maximum=1.0,
@@ -1347,8 +1349,9 @@ def create_gui() -> gr.Blocks:
             img,
             algo,
             theme,
-            h_range,
+            h_min,
             h_mid,
+            h_max,
             width,
             lvls,
             inv,
@@ -1385,8 +1388,9 @@ def create_gui() -> gr.Blocks:
                 target_stage_idx,
                 algo,
                 theme,
-                h_range,
+                h_min,
                 h_mid,
+                h_max,
                 width,
                 lvls,
                 inv,
@@ -1450,8 +1454,9 @@ def create_gui() -> gr.Blocks:
             input_image,
             algorithm,
             color_theme,
-            hist_range,
+            hist_min,
             hist_mid,
+            hist_max,
             output_width,
             levels,
             invert,
@@ -1499,8 +1504,9 @@ def create_gui() -> gr.Blocks:
         setting_keys = [
             "algorithm",
             "color_theme",
-            "hist_range",
+            "hist_min",
             "hist_mid",
+            "hist_max",
             "output_width",
             "levels",
             "gradient_sigma",
@@ -1535,8 +1541,9 @@ def create_gui() -> gr.Blocks:
         setting_components = [
             algorithm,
             color_theme,
-            hist_range,
+            hist_min,
             hist_mid,
+            hist_max,
             output_width,
             levels,
             gradient_sigma,
