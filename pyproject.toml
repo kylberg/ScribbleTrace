@@ -37,6 +37,8 @@ dependencies = [
 [project.optional-dependencies]
 gui = [
     "gradio>=4.0",
+    "dearpygui>=1.11",
+    "nicegui>=2.0",
 ]
 dev = [
     "pytest>=7.0",
@@ -46,6 +48,8 @@ dev = [
 [project.scripts]
 scribbletrace = "scribbletrace.cli:main"
 scribbletrace-gui = "scribbletrace.gui:main"
+scribbletrace-dpg = "scribbletrace.gui_dpg:main"
+scribbletrace-nicegui = "scribbletrace.gui_nicegui:main"
 
 [project.urls]
 Homepage = "https://github.com/kylberg/ScribbleTrace"
