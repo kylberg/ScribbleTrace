@@ -1,10 +1,10 @@
 """NiceGUI-based web interface for ScribbleTrace.
 
-This module provides a browser UI alternative to the Gradio app while
-reusing the same processing pipeline and parameter model.
+This module provides a browser-based UI for the ScribbleTrace pen plotter
+tool, using the NiceGUI framework.
 
 Usage:
-    scribbletrace-nicegui
+    scribbletrace-gui
     # or
     python -m scribbletrace.gui_nicegui
 """
@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import re
+import tempfile
 from datetime import datetime
 from xml.dom import minidom
 from dataclasses import dataclass, field
@@ -25,17 +27,622 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from scribbletrace.gui import (
-    PIPELINE_STEP_LABELS,
-    apply_histogram_transform,
-    get_default_gui_image,
-    normalize_input_image,
-    resize_preview_nearest,
-    run_pipeline_to_stage,
-    to_display_uint8,
+from scribbletrace import SVGWriter, compute_gradients, preprocess
+from scribbletrace.image_processing import ProcessedImage
+from scribbletrace.svg_output import SVGConfig
+from scribbletrace.algorithms import (
+    Circles,
+    CirclesConfig,
+    Curves,
+    CurvesConfig,
+    HatchDirection,
+    Hatching,
+    HatchingConfig,
+    Lines,
+    LinesConfig,
+    Spirals,
+    SpiralsConfig,
+    Squares,
+    SquaresConfig,
 )
 
 ui = None
+
+# ---------------------------------------------------------------------------
+# Pipeline functions (moved from gui.py to eliminate Gradio dependency)
+# ---------------------------------------------------------------------------
+
+DEFAULT_IMAGE_PATH = Path(__file__).resolve().parent.parent / "examples" / "MagrittePipe.jpg"
+
+PIPELINE_STEP_LABELS = [
+    "1. Preprocess",
+    "2. Gradient Magnitude",
+    "3. Final SVG",
+]
+
+
+def create_sample_image() -> np.ndarray:
+    """Create a simple gradient sample image for testing."""
+    size = 200
+    x = np.linspace(0, 1, size)
+    y = np.linspace(0, 1, size)
+    xx, yy = np.meshgrid(x, y)
+    img = 1 - np.sqrt((xx - 0.5) ** 2 + (yy - 0.5) ** 2) * 1.5
+    img = np.clip(img, 0, 1)
+    return img
+
+
+def get_default_gui_image() -> np.ndarray | None:
+    """Load the default GUI image if available, otherwise return None."""
+    if DEFAULT_IMAGE_PATH.exists():
+        try:
+            return np.array(Image.open(DEFAULT_IMAGE_PATH).convert("RGB"))
+        except Exception:
+            return None
+    return None
+
+
+def normalize_input_image(input_image: np.ndarray | None) -> np.ndarray:
+    """Normalize an input image to a 2D grayscale float array in [0, 1]."""
+    if input_image is None:
+        input_image = create_sample_image()
+
+    img = np.asarray(input_image, dtype=np.float64)
+
+    if img.max() > 1.0:
+        img = img / 255.0
+
+    if img.ndim == 3:
+        if img.shape[2] == 4:
+            img = 0.2989 * img[:, :, 0] + 0.5870 * img[:, :, 1] + 0.1140 * img[:, :, 2]
+        elif img.shape[2] == 3:
+            img = 0.2989 * img[:, :, 0] + 0.5870 * img[:, :, 1] + 0.1140 * img[:, :, 2]
+        else:
+            img = img[:, :, 0]
+
+    img = np.squeeze(img)
+    if img.ndim != 2:
+        raise ValueError(f"Could not convert image to 2D grayscale. Shape: {img.shape}")
+
+    return np.clip(img, 0.0, 1.0)
+
+
+def to_display_uint8(image: np.ndarray, levels: int | None = None) -> np.ndarray:
+    """Convert an image array to uint8 for display."""
+    arr = np.asarray(image, dtype=np.float64)
+    if levels is not None and levels > 1:
+        arr = np.clip(arr / float(levels - 1), 0.0, 1.0)
+    else:
+        arr_min = float(arr.min())
+        arr_max = float(arr.max())
+        if arr_max > arr_min:
+            arr = (arr - arr_min) / (arr_max - arr_min)
+        else:
+            arr = np.zeros_like(arr)
+    return np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+
+
+def resize_preview_nearest(image: np.ndarray, target_shape: tuple[int, int]) -> np.ndarray:
+    """Resize a preview image with nearest-neighbor interpolation."""
+    target_h, target_w = target_shape
+    arr = np.asarray(image, dtype=np.uint8)
+
+    if arr.ndim != 2:
+        return arr
+
+    if arr.shape == (target_h, target_w):
+        return arr
+
+    if hasattr(Image, "Resampling"):
+        resample = Image.Resampling.NEAREST
+    else:
+        resample = Image.NEAREST
+
+    return np.asarray(
+        Image.fromarray(arr).resize((target_w, target_h), resample=resample),
+        dtype=np.uint8,
+    )
+
+
+def image_signature(image: np.ndarray) -> str:
+    """Create a stable signature for a normalized image."""
+    digest = hashlib.sha1(image.tobytes()).hexdigest()  # noqa: S324
+    return f"{image.shape}:{digest}"
+
+
+def _normalize_histogram_knots(h_min: float, h_mid: float, h_max: float) -> tuple[float, float, float]:
+    """Return safe, ordered histogram transform knot positions in [0, 1]."""
+    min_v = float(np.clip(h_min, 0.0, 1.0))
+    mid_v = float(np.clip(h_mid, 0.0, 1.0))
+    max_v = float(np.clip(h_max, 0.0, 1.0))
+
+    eps = 1e-4
+    if min_v > max_v:
+        min_v, max_v = max_v, min_v
+    mid_v = min(max(mid_v, min_v + eps), max_v - eps)
+    if max_v - min_v < 2 * eps:
+        min_v = max(0.0, min_v - eps)
+        max_v = min(1.0, max_v + eps)
+        mid_v = (min_v + max_v) / 2
+
+    return min_v, mid_v, max_v
+
+
+def apply_histogram_transform(
+    image: np.ndarray,
+    hist_min: float,
+    hist_mid: float,
+    hist_max: float,
+) -> np.ndarray:
+    """Apply a three-knot tonal transform (min->0, mid->0.5, max->1)."""
+    min_v, mid_v, max_v = _normalize_histogram_knots(hist_min, hist_mid, hist_max)
+    in_levels = np.array([min_v, mid_v, max_v], dtype=np.float64)
+    out_levels = np.array([0.0, 0.5, 1.0], dtype=np.float64)
+    transformed = np.interp(np.asarray(image, dtype=np.float64), in_levels, out_levels)
+    return np.clip(transformed, 0.0, 1.0)
+
+
+def render_histogram_preview(
+    image: np.ndarray,
+    hist_min: float,
+    hist_mid: float,
+    hist_max: float,
+    bins: int = 128,
+    width: int = 720,
+    height: int = 220,
+) -> np.ndarray:
+    """Render a simple histogram preview with vertical marker lines."""
+    values = np.clip(np.asarray(image, dtype=np.float64).ravel(), 0.0, 1.0)
+    counts, _ = np.histogram(values, bins=bins, range=(0.0, 1.0))
+    max_count = max(1, int(counts.max()))
+
+    canvas = np.full((height, width, 3), 255, dtype=np.uint8)
+
+    for idx, count in enumerate(counts):
+        x0 = int(idx * width / bins)
+        x1 = int((idx + 1) * width / bins)
+        bar_h = int((count / max_count) * (height - 24))
+        y0 = height - 1
+        y1 = max(0, y0 - bar_h)
+        canvas[y1:y0, x0:max(x0 + 1, x1), :] = 40
+
+    min_v, mid_v, max_v = _normalize_histogram_knots(hist_min, hist_mid, hist_max)
+    markers = [
+        (min_v, np.array([230, 57, 70], dtype=np.uint8)),
+        (mid_v, np.array([241, 160, 17], dtype=np.uint8)),
+        (max_v, np.array([69, 123, 157], dtype=np.uint8)),
+    ]
+    for pos, color in markers:
+        x = int(np.clip(round(pos * (width - 1)), 0, width - 1))
+        canvas[:, max(0, x - 1) : min(width, x + 2), :] = color
+
+    return canvas
+
+
+def resolve_svg_theme(color_theme: str) -> tuple[str, str]:
+    """Return stroke/background colors for a named SVG theme."""
+    if color_theme == "White Lines on Black":
+        return ("white", "black")
+    return ("black", "white")
+
+
+def estimate_vertex_count(
+    processed: ProcessedImage,
+    algorithm: str,
+    theta_resolution: int,
+    circle_points: int,
+    max_steps: int,
+    bezier_samples: int,
+    hatch_horizontal: bool,
+    hatch_vertical: bool,
+    hatch_diag_right: bool,
+    hatch_diag_left: bool,
+    min_spacing: float,
+) -> int:
+    """Estimate vertex count for safety/preview purposes."""
+    data = processed.data.astype(int)
+    intensity_sum = int(np.sum(data))
+    h, w = data.shape
+    cells = int(h * w)
+
+    if algorithm == "spirals":
+        values = data.ravel()
+        zeros = int(np.sum(values == 0))
+        nonzero = values[values > 0]
+        nz_vertices = np.maximum(3, np.round(theta_resolution * nonzero / 2.0).astype(int))
+        nz_vertices = nz_vertices + (nz_vertices % 2 == 0)
+        return int(zeros * theta_resolution + int(np.sum(nz_vertices)))
+
+    if algorithm == "circles":
+        return int(intensity_sum * (circle_points + 1))
+
+    if algorithm == "squares":
+        return int(intensity_sum * 5)
+
+    if algorithm == "lines":
+        return int(intensity_sum * 2)
+
+    if algorithm == "curves":
+        return int(max(1, intensity_sum) * max(3, max_steps * max(2, bezier_samples // 2)))
+
+    if algorithm == "hatching":
+        directions = sum([hatch_horizontal, hatch_vertical, hatch_diag_right, hatch_diag_left])
+        directions = max(1, directions)
+        spacing = max(0.1, float(min_spacing))
+        lines_est = ((w + h) / spacing) * directions
+        verts_per_line = max(w, h)
+        return int(lines_est * verts_per_line)
+
+    return int(cells)
+
+
+def generate_svg_content(
+    processed: ProcessedImage,
+    gradients,
+    algorithm: str,
+    color_theme: str,
+    stroke_width: float,
+    randomness_vertex: float,
+    randomness_position: float,
+    theta_resolution: int,
+    spiral_b: float,
+    connect_cells: bool,
+    circle_points: int,
+    small_first: bool,
+    hatch_horizontal: bool,
+    hatch_vertical: bool,
+    hatch_diag_right: bool,
+    hatch_diag_left: bool,
+    min_spacing: float,
+    max_spacing: float,
+    lines_segment_length: float,
+    randomness_length: float,
+    min_gradient_scale: float,
+    max_gradient_scale: float,
+    curves_segment_length: float,
+    curves_randomness_length: float,
+    max_steps: int,
+    step_size: float,
+    bezier_samples: int,
+) -> tuple[str, np.ndarray]:
+    """Generate SVG content and gradient magnitude from already computed intermediates."""
+    if algorithm == "spirals":
+        config = SpiralsConfig(
+            randomness_vertex=randomness_vertex,
+            randomness_position=randomness_position,
+            stroke_width=stroke_width,
+            theta_resolution=theta_resolution,
+            spiral_b=spiral_b,
+            connect_cells=connect_cells,
+        )
+        algo = Spirals(processed, config)
+
+    elif algorithm == "circles":
+        config = CirclesConfig(
+            randomness_vertex=randomness_vertex,
+            randomness_position=randomness_position,
+            stroke_width=stroke_width,
+            circle_points=circle_points,
+            small_first=small_first,
+        )
+        algo = Circles(processed, config)
+
+    elif algorithm == "squares":
+        config = SquaresConfig(
+            randomness_vertex=randomness_vertex,
+            randomness_position=randomness_position,
+            stroke_width=stroke_width,
+            small_first=small_first,
+        )
+        algo = Squares(processed, config)
+
+    elif algorithm == "lines":
+        config = LinesConfig(
+            randomness_vertex=randomness_vertex,
+            randomness_position=randomness_position,
+            stroke_width=stroke_width,
+            segment_length=lines_segment_length,
+            randomness_length=randomness_length,
+            min_gradient_scale=min_gradient_scale,
+            max_gradient_scale=max_gradient_scale,
+        )
+        algo = Lines(processed, config, gradients)
+
+    elif algorithm == "curves":
+        config = CurvesConfig(
+            randomness_vertex=randomness_vertex,
+            randomness_position=randomness_position,
+            stroke_width=stroke_width,
+            segment_length=curves_segment_length,
+            randomness_length=curves_randomness_length,
+            max_steps=max_steps,
+            step_size=step_size,
+            bezier_samples=bezier_samples,
+        )
+        algo = Curves(processed, config, gradients)
+
+    elif algorithm == "hatching":
+        directions = []
+        if hatch_horizontal:
+            directions.append(HatchDirection.HORIZONTAL)
+        if hatch_vertical:
+            directions.append(HatchDirection.VERTICAL)
+        if hatch_diag_right:
+            directions.append(HatchDirection.DIAGONAL_RIGHT)
+        if hatch_diag_left:
+            directions.append(HatchDirection.DIAGONAL_LEFT)
+        if not directions:
+            directions = [HatchDirection.DIAGONAL_RIGHT]
+
+        config = HatchingConfig(
+            randomness_vertex=randomness_vertex,
+            randomness_position=randomness_position,
+            stroke_width=stroke_width,
+            directions=directions,
+            min_spacing=min_spacing,
+            max_spacing=max_spacing,
+        )
+        algo = Hatching(processed, config, gradients)
+    else:
+        raise ValueError(f"Unknown algorithm: {algorithm}")
+
+    paths = algo.process()
+    stroke_color, background_color = resolve_svg_theme(color_theme)
+    svg_config = SVGConfig(
+        width=processed.width + 2,
+        height=processed.height + 2,
+        stroke_color=stroke_color,
+        background=background_color,
+    )
+    writer = SVGWriter(paths, config=svg_config)
+    return writer.to_string(), gradients.magnitude
+
+
+def run_pipeline_to_stage(
+    pipeline_cache: dict[str, Any] | None,
+    input_image: np.ndarray | None,
+    target_stage_index: int,
+    algorithm: str,
+    color_theme: str,
+    hist_min: float,
+    hist_mid: float,
+    hist_max: float,
+    output_width: float,
+    levels: int,
+    invert: bool,
+    gradient_sigma: float,
+    stroke_width: float,
+    randomness_vertex: float,
+    randomness_position: float,
+    theta_resolution: int,
+    spiral_b: float,
+    connect_cells: bool,
+    circle_points: int,
+    small_first: bool,
+    hatch_horizontal: bool,
+    hatch_vertical: bool,
+    hatch_diag_right: bool,
+    hatch_diag_left: bool,
+    min_spacing: float,
+    max_spacing: float,
+    lines_segment_length: float,
+    randomness_length: float,
+    min_gradient_scale: float,
+    max_gradient_scale: float,
+    curves_segment_length: float,
+    curves_randomness_length: float,
+    max_steps: int,
+    step_size: float,
+    bezier_samples: int,
+    enable_vertex_guard: bool,
+    max_estimated_vertices: float,
+) -> tuple[
+    None,  # svg_preview_image (not used in NiceGUI)
+    str,  # svg_code
+    None,  # download_update (not used in NiceGUI)
+    np.ndarray | None,  # gradient_display
+    np.ndarray | None,  # grayscale_display
+    np.ndarray | None,  # downscaled_display
+    np.ndarray | None,  # quantized_display
+    np.ndarray | None,  # hist_preview
+    str,  # complexity_text
+    str,  # status
+    dict[str, Any],  # cache
+]:
+    """Run the image pipeline up to a target stage and return GUI-ready outputs."""
+    cache = pipeline_cache if isinstance(pipeline_cache, dict) else {}
+    target_stage_index = int(np.clip(target_stage_index, 0, len(PIPELINE_STEP_LABELS) - 1))
+
+    hist_min, hist_mid, hist_max = _normalize_histogram_knots(hist_min, hist_mid, hist_max)
+
+    grayscale_original = normalize_input_image(input_image)
+    grayscale = apply_histogram_transform(grayscale_original, hist_min, hist_mid, hist_max)
+    image_key = image_signature(grayscale_original)
+    if cache.get("image_key") != image_key:
+        cache = {"image_key": image_key, "grayscale": grayscale_original}
+    else:
+        cache["grayscale"] = grayscale_original
+
+    hist_preview = render_histogram_preview(grayscale_original, hist_min, hist_mid, hist_max)
+
+    grayscale_display = to_display_uint8(grayscale)
+    preview_shape = grayscale_display.shape
+
+    downscaled_display = None
+    quantized_display = None
+    gradient_display = None
+    complexity_text = ""  # No longer displayed
+
+    processed: ProcessedImage | None = None
+    gradients = None
+
+    if target_stage_index >= 0:
+        processed_key = (
+            float(output_width),
+            int(levels),
+            bool(invert),
+            round(float(hist_min), 6),
+            round(float(hist_mid), 6),
+            round(float(hist_max), 6),
+        )
+        if cache.get("processed_key") != processed_key:
+            cache["processed"] = preprocess(grayscale, output_width=output_width, levels=levels, invert=invert)
+            cache["processed_key"] = processed_key
+            cache["gradients_by_sigma"] = {}
+            cache["svg_by_key"] = {}
+        processed = cache["processed"]
+        resized_inverted = 1.0 - processed.original if invert else processed.original
+        step1_display = to_display_uint8(resized_inverted)
+        step1_display = resize_preview_nearest(step1_display, preview_shape)
+        grayscale_display = step1_display
+        downscaled_display = step1_display
+
+    if target_stage_index >= 0 and processed is not None:
+        quantized_display = to_display_uint8(processed.data, levels=processed.levels)
+        quantized_display = resize_preview_nearest(quantized_display, preview_shape)
+
+    if target_stage_index >= 1 and processed is not None:
+        sigma_key = round(float(gradient_sigma), 4)
+        gradients_by_sigma = cache.setdefault("gradients_by_sigma", {})
+        gradients = gradients_by_sigma.get(sigma_key)
+        if gradients is None:
+            gradients = compute_gradients(processed.original, sigma=gradient_sigma)
+            gradients_by_sigma[sigma_key] = gradients
+        gradient_display = to_display_uint8(gradients.magnitude)
+        gradient_display = resize_preview_nearest(gradient_display, preview_shape)
+
+    svg_code = ""
+
+    if target_stage_index >= 2:
+        if processed is None:
+            processed = preprocess(grayscale, output_width=output_width, levels=levels, invert=invert)
+
+        estimated_vertices = estimate_vertex_count(
+            processed,
+            algorithm,
+            theta_resolution,
+            circle_points,
+            max_steps,
+            bezier_samples,
+            hatch_horizontal,
+            hatch_vertical,
+            hatch_diag_right,
+            hatch_diag_left,
+            min_spacing,
+        )
+
+        if enable_vertex_guard and estimated_vertices > int(max_estimated_vertices):
+            status = f"Skipped: {estimated_vertices:,} vertices > {int(max_estimated_vertices):,} limit"
+            return (
+                None,
+                "",
+                None,
+                gradient_display,
+                grayscale_display,
+                downscaled_display,
+                quantized_display,
+                hist_preview,
+                complexity_text,
+                status,
+                cache,
+            )
+
+        sigma_key = round(float(gradient_sigma), 4)
+        gradients_by_sigma = cache.setdefault("gradients_by_sigma", {})
+        gradients = gradients_by_sigma.get(sigma_key)
+        if gradients is None:
+            gradients = compute_gradients(processed.original, sigma=gradient_sigma)
+            gradients_by_sigma[sigma_key] = gradients
+
+        svg_key = (
+            algorithm,
+            color_theme,
+            float(stroke_width),
+            float(randomness_vertex),
+            float(randomness_position),
+            int(theta_resolution),
+            float(spiral_b),
+            bool(connect_cells),
+            int(circle_points),
+            bool(small_first),
+            bool(hatch_horizontal),
+            bool(hatch_vertical),
+            bool(hatch_diag_right),
+            bool(hatch_diag_left),
+            float(min_spacing),
+            float(max_spacing),
+            float(lines_segment_length),
+            float(randomness_length),
+            float(min_gradient_scale),
+            float(max_gradient_scale),
+            float(curves_segment_length),
+            float(curves_randomness_length),
+            int(max_steps),
+            float(step_size),
+            int(bezier_samples),
+            sigma_key,
+        )
+        svg_by_key = cache.setdefault("svg_by_key", {})
+        cached_svg = svg_by_key.get(svg_key)
+        if cached_svg is None:
+            cached_svg = generate_svg_content(
+                processed,
+                gradients,
+                algorithm,
+                color_theme,
+                stroke_width,
+                randomness_vertex,
+                randomness_position,
+                theta_resolution,
+                spiral_b,
+                connect_cells,
+                circle_points,
+                small_first,
+                hatch_horizontal,
+                hatch_vertical,
+                hatch_diag_right,
+                hatch_diag_left,
+                min_spacing,
+                max_spacing,
+                lines_segment_length,
+                randomness_length,
+                min_gradient_scale,
+                max_gradient_scale,
+                curves_segment_length,
+                curves_randomness_length,
+                max_steps,
+                step_size,
+                bezier_samples,
+            )
+            svg_by_key[svg_key] = cached_svg
+
+        svg_content, gradient_magnitude = cached_svg
+        svg_code = svg_content
+
+        # Keep gradient tab meaningful for all algorithms once gradients are computed
+        if gradient_display is None:
+            gradient_display = to_display_uint8(gradient_magnitude)
+            gradient_display = resize_preview_nearest(gradient_display, preview_shape)
+
+    status = ""
+    return (
+        None,
+        svg_code,
+        None,
+        gradient_display,
+        grayscale_display,
+        downscaled_display,
+        quantized_display,
+        hist_preview,
+        complexity_text,
+        status,
+        cache,
+    )
+
+
+# ---------------------------------------------------------------------------
+# NiceGUI-specific code
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -52,6 +659,8 @@ class NiceGuiState:
     hist_source_width: int = 720
     using_default_input: bool = True
     is_processing: bool = False
+    # Uploaded images library: {name: np.ndarray}
+    uploaded_images: dict[str, np.ndarray] = field(default_factory=dict)
     # Backdrop images for preview overlay (all at processed resolution)
     backdrop_gradient: np.ndarray | None = None
     backdrop_quantized: np.ndarray | None = None
@@ -64,7 +673,12 @@ class NiceGuiState:
 
 HIST_WIDTH = 480
 HIST_HEIGHT = 150
-PREVIEW_CONTAINER_SIZE = 520  # Square preview container in pixels
+PREVIEW_CONTAINER_SIZES = {
+    "Small": 420,
+    "Medium": 560,
+    "Large": 720,
+    "X-Large": 900,
+}
 UI_STEP_LABELS = ["1. Image Processing", "2. Vector Generation"]
 DEFAULT_PREVIEW_WIDTH = "w-[420px]"
 PREVIEW_WIDTH_CLASSES = {
@@ -221,21 +835,6 @@ def _format_slider_value(value: float | int, precision: int) -> str:
     if precision <= 0:
         return str(int(round(float(value))))
     return f"{float(value):.{precision}f}"
-
-
-def _normalize_hist_knots(min_v: float, mid_v: float, max_v: float) -> tuple[float, float, float]:
-    min_v = float(np.clip(min_v, 0.0, 1.0))
-    mid_v = float(np.clip(mid_v, 0.0, 1.0))
-    max_v = float(np.clip(max_v, 0.0, 1.0))
-
-    eps = 1e-4
-    if min_v > max_v:
-        min_v, max_v = max_v, min_v
-    if max_v - min_v < 2 * eps:
-        min_v = max(0.0, min_v - eps)
-        max_v = min(1.0, max_v + eps)
-    mid_v = min(max(mid_v, min_v + eps), max_v - eps)
-    return min_v, mid_v, max_v
 
 
 def _style_histogram_image(image: np.ndarray | None) -> np.ndarray | None:
@@ -550,7 +1149,14 @@ def _build_download_base_name(input_name: str, algorithm: str, now: datetime | N
 def create_gui() -> None:
     _require_nicegui()
 
-    state = NiceGuiState(input_image=get_default_gui_image(), input_image_name="default", using_default_input=True)
+    # Initialize with default image already in the gallery
+    default_img = get_default_gui_image()
+    state = NiceGuiState(
+        input_image=default_img,
+        input_image_name="default",
+        using_default_input=True,
+        uploaded_images={"default": default_img} if default_img is not None else {},
+    )
 
     controls: dict[str, Any] = {}
     outputs: dict[str, Any] = {}
@@ -662,10 +1268,14 @@ def create_gui() -> None:
                 outputs[key].classes(remove="w-[320px] w-[420px] w-[560px]", add=width_class)
 
     def _update_svg_preview_html() -> None:
+        # Get preview container size
+        preview_size = str(_safe_value(controls.get("preview_size", _ValueProxy("Medium"))))
+        container_size = PREVIEW_CONTAINER_SIZES.get(preview_size, 560)
+        
         # Show processing message while generating vectors
         if state.is_processing:
             outputs["svg_preview_html"].set_content(
-                '<div class="st-card" style="width:100%; height:520px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px;">'
+                f'<div class="st-card" style="width:{container_size}px; height:{container_size}px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px;">'
                 '<div style="font-size:48px;">⏳</div>'
                 '<div style="font-size:20px; font-weight:600; color:#9ccfd8;">Generating Vectors...</div>'
                 '<div style="font-size:14px; color:#908caa;">Processing your image (1-15 seconds)</div>'
@@ -676,7 +1286,7 @@ def create_gui() -> None:
         svg_code = state.latest_svg_content or ""
         if not svg_code.strip():
             outputs["svg_preview_html"].set_content(
-                '<div class="st-card" style="padding:12px; color:#908caa;">No SVG generated yet.</div>'
+                f'<div class="st-card" style="width:{container_size}px; height:{container_size}px; padding:12px; color:#908caa; display:flex; align-items:center; justify-content:center;">No SVG generated yet.</div>'
             )
             return
 
@@ -687,21 +1297,10 @@ def create_gui() -> None:
         paper_size = str(_safe_value(controls.get("paper_size", _ValueProxy("A4"))))
         orientation = str(_safe_value(controls.get("paper_orientation", _ValueProxy("Portrait"))))
         
-        # Calculate fit zoom based on paper dimensions and preview container
-        # Preview container is square (PREVIEW_CONTAINER_SIZE x PREVIEW_CONTAINER_SIZE)
-        paper_dims = PAPER_SIZES_MM.get(paper_size, (210, 297))
-        paper_w_mm, paper_h_mm = paper_dims
-        if orientation == "Landscape":
-            paper_w_mm, paper_h_mm = paper_h_mm, paper_w_mm
-        
-        # At zoom=100%, img width = container width, height scales by aspect
-        # For fit: we want both width and height to fit
-        # fit_zoom = min(100, 100 * container_h / (container_w * paper_h / paper_w))
-        # For square container: fit_zoom = min(100, 100 * paper_w / paper_h)
-        aspect = paper_h_mm / paper_w_mm
-        fit_zoom = min(100, int(100 / aspect)) if aspect > 1 else 100
-        
-        zoom = int(_safe_value(controls.get("svg_zoom", _ValueProxy(fit_zoom))))
+        # Zoom level from preset toggle (default to "Fit" if not set)
+        zoom_val = str(_safe_value(controls.get("svg_zoom", _ValueProxy("Fit"))))
+        zoom_fit = zoom_val == "Fit"
+        zoom = int(zoom_val.rstrip("%")) if not zoom_fit else 100
         
         # Get backdrop image data URL if needed
         backdrop_url = ""
@@ -837,12 +1436,19 @@ def create_gui() -> None:
         svg_url = _svg_text_to_data_url(svg_for_preview)
         
         # Single consistent preview - just the SVG (with or without embedded backdrop)
-        # Square container for consistent viewing
+        # Square container for consistent viewing, content centered
+        if zoom_fit:
+            # Fit mode: scale to fit container without scrolling
+            img_style = f"display:block; max-width:100%; max-height:100%; width:auto; height:auto; object-fit:contain; image-rendering:{img_rendering};"
+        else:
+            # Percentage zoom: fixed width, allow scrolling
+            img_style = f"display:block; width:{zoom}%; max-width:none; height:auto; image-rendering:{img_rendering}; flex-shrink:0;"
+        
         outputs["svg_preview_html"].set_content(
             "".join(
                 [
-                    f'<div class="st-card" style="width:{PREVIEW_CONTAINER_SIZE}px; height:{PREVIEW_CONTAINER_SIZE}px; overflow:auto;">',
-                    f'<img src="{svg_url}" style="display:block; width:{zoom}%; max-width:none; height:auto; image-rendering:{img_rendering};"/>',
+                    f'<div class="st-card" style="width:{container_size}px; height:{container_size}px; overflow:auto; display:flex; align-items:center; justify-content:center;">',
+                    f'<img src="{svg_url}" style="{img_style}"/>',
                     "</div>",
                 ]
             )
@@ -879,7 +1485,7 @@ def create_gui() -> None:
         outputs["hist_marker_info"].set_text(f"Active marker: {active.upper()}")
 
     def _sync_hist_controls(min_v: float, mid_v: float, max_v: float) -> None:
-        min_v, mid_v, max_v = _normalize_hist_knots(min_v, mid_v, max_v)
+        min_v, mid_v, max_v = _normalize_histogram_knots(min_v, mid_v, max_v)
         state.suppress_hist_callbacks = True
         controls["hist_min"].set_value(min_v)
         controls["hist_mid"].set_value(mid_v)
@@ -942,29 +1548,60 @@ def create_gui() -> None:
             _set_hist_target_value(target, _tone_from_hist_event(e))
             asyncio.create_task(run_to_stage(1))
 
-    def _set_default_visibility() -> None:
-        if "default_group" in outputs:
-            outputs["default_group"].set_visibility(state.using_default_input)
-
     def update_input_preview() -> None:
-        if state.input_image is None:
-            return
-        src = np.asarray(state.input_image)
-        gray = normalize_input_image(state.input_image)
-        outputs["current_original_preview"].set_source(_np_to_data_url(_downscale_for_ui(src)))
-        outputs["current_grayscale_preview"].set_source(
-            _np_to_data_url(_downscale_for_ui((gray * 255.0).astype(np.uint8)))
-        )
-        _set_default_visibility()
+        # Gallery handles display - nothing else to update
+        pass
 
-    def on_load_default() -> None:
-        state.input_image = get_default_gui_image()
-        state.input_image_name = "default"
-        state.using_default_input = True
-        outputs["input_name"].set_text("Input: default")
-        state.pipeline_cache = {}
-        update_input_preview()
-        asyncio.create_task(run_to_stage(1))
+    def _update_image_gallery() -> None:
+        """Rebuild the image gallery with clickable thumbnails."""
+        if "image_gallery" not in outputs:
+            return
+        gallery = outputs["image_gallery"]
+        gallery.clear()
+        
+        def _select_image(name: str):
+            """Select an image as current input."""
+            if name in state.uploaded_images:
+                state.input_image = state.uploaded_images[name]
+                state.input_image_name = name
+                state.using_default_input = (name == "default")
+                outputs["input_name"].set_text(f"Input: {name}")
+                state.pipeline_cache = {}
+                update_input_preview()
+                _update_image_gallery()  # Update selection highlight
+                asyncio.create_task(run_to_stage(1))
+        
+        def _remove_image(name: str):
+            """Remove an image from the library (cannot remove default)."""
+            if name == "default":
+                return  # Don't allow removing default
+            if name in state.uploaded_images:
+                del state.uploaded_images[name]
+                # If this was the current image, switch to default
+                if state.input_image_name == name:
+                    _select_image("default")
+                else:
+                    _update_image_gallery()
+        
+        with gallery:
+            for name, img in state.uploaded_images.items():
+                is_current = name == state.input_image_name
+                border_class = "border-2 border-[#9ccfd8]" if is_current else "border border-[#39414f]"
+                with ui.column().classes(f"gap-1 p-2 rounded-lg bg-[#141a24] {border_class} cursor-pointer"):
+                    thumb_url = _np_to_data_url(_downscale_for_ui(img, max_dim=100))
+                    ui.image(thumb_url).classes("w-[80px] h-[60px] object-cover rounded").on(
+                        "click", lambda _, n=name: _select_image(n)
+                    )
+                    with ui.row().classes("items-center gap-1"):
+                        short_name = name[:12] + "..." if len(name) > 15 else name
+                        ui.label(short_name).classes("text-xs st-muted").on(
+                            "click", lambda _, n=name: _select_image(n)
+                        )
+                        # Only show delete button for non-default images
+                        if name != "default":
+                            ui.button(icon="close", on_click=lambda _, n=name: _remove_image(n)).props(
+                                "flat dense round size=xs"
+                            ).classes("text-xs")
 
     async def run_to_stage(stage_index: int) -> None:
         state.is_processing = True
@@ -1056,7 +1693,6 @@ def create_gui() -> None:
         hist_result_display = resize_preview_nearest(hist_result_display, preview_shape)
 
         outputs["status"].set_text(status_text)
-        outputs["complexity"].set_text(complexity_text)
         outputs["histogram"].set_source(_np_to_data_url(_style_histogram_image(_downscale_for_ui(histogram))))
         _update_hist_overlay()
         outputs["preview_grayscale"].set_source(_np_to_data_url(_downscale_for_ui(gray_display)))
@@ -1132,9 +1768,6 @@ def create_gui() -> None:
         settings_snapshot = _build_settings_snapshot(controls)
         outputs["settings_source"].set_content(json.dumps(settings_snapshot, indent=2))
 
-        if svg_preview is None:
-            state.latest_svg_content = ""
-
         # Mark processing complete BEFORE updating preview so it shows the SVG, not "Processing..."
         state.current_stage = max(0, min(stage_index, len(PIPELINE_STEP_LABELS) - 1))
         state.is_processing = False
@@ -1144,14 +1777,21 @@ def create_gui() -> None:
         _update_svg_preview_html()
 
     async def on_open_image(e) -> None:
+        """Handle image upload - adds to library and selects it."""
         try:
             data = await e.file.read()
-            state.input_image = np.array(Image.open(io.BytesIO(data)).convert("RGB"))
-            state.input_image_name = e.file.name
+            img = np.array(Image.open(io.BytesIO(data)).convert("RGB"))
+            name = e.file.name
+            # Add to images library
+            state.uploaded_images[name] = img
+            # Select this image as current
+            state.input_image = img
+            state.input_image_name = name
             state.using_default_input = False
-            outputs["input_name"].set_text(f"Input: {state.input_image_name}")
+            outputs["input_name"].set_text(f"Input: {name}")
             state.pipeline_cache = {}
             update_input_preview()
+            _update_image_gallery()
             await run_to_stage(1)
         except Exception as err:  # noqa: BLE001
             ui.notify(f"Failed to load image: {err}", color="negative")
@@ -1316,6 +1956,13 @@ def create_gui() -> None:
     with ui.row().classes("w-full justify-between items-center mb-4"):
         ui.label("ScribbleTrace NiceGUI").classes("st-title")
         with ui.row().classes("items-center gap-2"):
+            # GitHub repo link
+            with ui.link(target="https://github.com/kylberg/ScribbleTrace", new_tab=True):
+                ui.html(
+                    '<svg viewBox="0 0 24 24" width="24" height="24" fill="#908caa" style="cursor:pointer;">'
+                    '<path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>'
+                    '</svg>'
+                ).tooltip("View on GitHub")
             outputs["dark_mode_toggle"] = ui.button(icon="dark_mode").props("flat round")
             def toggle_dark_mode():
                 dark_mode.toggle()
@@ -1333,41 +1980,25 @@ def create_gui() -> None:
 
         with ui.tab_panels(tabs, value=tab_processing).props("vertical animated transition-prev=fade transition-next=fade").classes("flex-1 min-w-0"):
             with ui.tab_panel(tab_input):
-                with ui.column().classes("w-full max-w-[720px] gap-3"):
-                    outputs["input_name"] = ui.label("Input: default")
-                    outputs["status"] = ui.label("Pipeline at 1. Image Processing").classes("st-muted")
-                    outputs["complexity"] = ui.label("Estimated vertices: -").classes("st-muted")
-                    ui.upload(on_upload=on_open_image, auto_upload=True, label="Upload Image").classes("w-full")
-                    ui.button("Load Default", on_click=on_load_default)
+                with ui.column().classes("w-full max-w-[720px] gap-4"):
+                    outputs["input_name"] = ui.label("Input: default").classes("st-title")
+                    outputs["status"] = ui.label("").classes("st-muted")
+                    
+                    # Image gallery (default + uploaded)
+                    outputs["image_gallery"] = ui.row().classes("w-full gap-2 flex-wrap")
+                    
+                    # Upload button
+                    ui.upload(
+                        on_upload=on_open_image, 
+                        auto_upload=True, 
+                        multiple=True,
+                        label="Add images"
+                    ).classes("max-w-[200px]").props('accept="image/*" flat')
 
-                    with ui.column().classes("w-full gap-2"):
-                        ui.label("Current Input").classes("st-title")
-                        with ui.row().classes("w-full gap-4 flex-wrap"):
-                            with ui.column().classes("gap-1"):
-                                ui.label("Original").classes("st-muted")
-                                outputs["current_original_preview"] = ui.image().classes("w-[320px] max-w-full st-card")
-                            with ui.column().classes("gap-1"):
-                                ui.label("Grayscale").classes("st-muted")
-                                outputs["current_grayscale_preview"] = ui.image().classes("w-[320px] max-w-full st-card")
-
-                    outputs["default_group"] = ui.column().classes("w-full gap-2")
-                    with outputs["default_group"]:
-                        ui.label("Default Reference").classes("st-title")
-                        default_img = get_default_gui_image()
-                        default_gray = normalize_input_image(default_img)
-                        with ui.row().classes("w-full gap-4 flex-wrap"):
-                            with ui.column().classes("gap-1"):
-                                ui.label("Default Original").classes("st-muted")
-                                ui.image(_np_to_data_url(_downscale_for_ui(default_img))).classes("w-[320px] max-w-full st-card")
-                            with ui.column().classes("gap-1"):
-                                ui.label("Default Grayscale").classes("st-muted")
-                                ui.image(_np_to_data_url(_downscale_for_ui((default_gray * 255.0).astype(np.uint8)))).classes(
-                                    "w-[320px] max-w-full st-card"
-                                )
-
+                    # Presets
                     with ui.row().classes("w-full gap-2 items-center"):
-                        ui.button("Save Preset", icon="save", on_click=download_settings)
-                        ui.upload(on_upload=on_load_preset, auto_upload=True, label="Load Preset").props('accept=".json"').classes("max-w-[200px]")
+                        ui.button("Save Preset", icon="save", on_click=download_settings).props("flat")
+                        ui.upload(on_upload=on_load_preset, auto_upload=True, label="Load Preset").props('accept=".json" flat').classes("max-w-[200px]")
 
             with ui.tab_panel(tab_processing):
                 with ui.column().classes("w-full gap-3"):
@@ -1663,24 +2294,12 @@ def create_gui() -> None:
                             outputs["gen_vectors_spinner"] = ui.spinner(size="xl").set_visibility(False)
                             outputs["gen_vectors_status"] = ui.label("Processing...").classes("st-muted").set_visibility(False)
                     with ui.row().classes("w-full items-center gap-2"):
-                        controls["svg_zoom"] = _slider_with_readout(
-                            label="Zoom", min_v=25, max_v=400, value=70, step=5
-                        )
+                        ui.label("Zoom").classes("st-muted")
+                        controls["svg_zoom"] = ui.toggle(
+                            ["Fit", "25%", "50%", "75%", "100%", "200%", "400%"],
+                            value="Fit"
+                        ).props("dense")
                         controls["svg_zoom"].on_value_change(lambda _: _update_svg_preview_html())
-                        
-                        def _set_zoom_fit():
-                            paper_size = str(_safe_value(controls.get("paper_size", _ValueProxy("A4"))))
-                            orientation = str(_safe_value(controls.get("paper_orientation", _ValueProxy("Portrait"))))
-                            paper_dims = PAPER_SIZES_MM.get(paper_size, (210, 297))
-                            pw, ph = paper_dims
-                            if orientation == "Landscape":
-                                pw, ph = ph, pw
-                            fit = min(100, int(100 * pw / ph)) if ph > pw else 100
-                            controls["svg_zoom"].set_value(fit)
-                        
-                        ui.button("Fit", on_click=_set_zoom_fit).props("flat dense").classes("text-xs")
-                        ui.button("100%", on_click=lambda: controls["svg_zoom"].set_value(100)).props("flat dense").classes("text-xs")
-                        ui.button("200%", on_click=lambda: controls["svg_zoom"].set_value(200)).props("flat dense").classes("text-xs")
                     
                     # Preview Background selector with thumbnails
                     controls["preview_backdrop"] = _ValueProxy(
@@ -1755,9 +2374,15 @@ def create_gui() -> None:
                         backdrop_tiles["Original"] = orig_tile
                     _update_backdrop_tile_styles()
                     
-                    with ui.row().classes("w-full items-center gap-2"):
+                    with ui.row().classes("w-full items-center gap-4"):
                         controls["pixelated"] = ui.switch("Pixelated", value=True)
                         controls["pixelated"].on_value_change(lambda _: _update_svg_preview_html())
+                        
+                        ui.label("Preview Size").classes("st-muted")
+                        controls["preview_size"] = ui.toggle(
+                            list(PREVIEW_CONTAINER_SIZES.keys()), value="Medium"
+                        ).props("dense")
+                        controls["preview_size"].on_value_change(lambda _: _update_svg_preview_html())
                     
                     # Preview Stroke Color - clickable swatches
                     controls["preview_stroke_color"] = _ValueProxy("")
@@ -1786,7 +2411,7 @@ def create_gui() -> None:
                         outputs["settings_source"] = ui.code("", language="json").classes("w-full")
 
     # Initial defaults and first run.
-    update_input_preview()
+    _update_image_gallery()
     ui.timer(0.1, lambda: asyncio.create_task(run_to_stage(1)), once=True)
 
 
@@ -1794,7 +2419,10 @@ def main() -> None:
     """Launch the NiceGUI app."""
     _require_nicegui()
     create_gui()
-    ui.run(title="ScribbleTrace NiceGUI", reload=False)
+    # Support PORT env var for cloud hosting (render.com, etc.)
+    import os
+    port = int(os.environ.get("PORT", 8080))
+    ui.run(title="ScribbleTrace NiceGUI", host="0.0.0.0", port=port, reload=False)
 
 
 if __name__ == "__main__":

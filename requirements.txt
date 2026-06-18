@@ -1,0 +1,9 @@
+# Core dependencies
+numpy>=1.24
+scikit-image>=0.21
+scipy>=1.10
+svgwrite>=1.4
+Pillow>=10.0
+
+# NiceGUI web interface
+nicegui>=2.0
