@@ -168,26 +168,10 @@ class SVGWriter:
         """
         cfg = self.config
         size = (f"{cfg.width}{cfg.units}", f"{cfg.height}{cfg.units}")
-        view_min_x = 0.0
-        view_min_y = 0.0
-        view_w = cfg.width
-        view_h = cfg.height
-
-        # Build a stroke-aware viewBox so paths at x=0/y=0 are not clipped.
-        if self.paths:
-            min_x, min_y, max_x, max_y = self.get_bounds()
-            max_stroke = max((p.stroke_width for p in self.paths), default=cfg.stroke_width)
-            pad = max(0.25, max_stroke / 2.0)
-
-            view_min_x = min(min_x - pad, 0.0)
-            view_min_y = min(min_y - pad, 0.0)
-            view_max_x = max(max_x + pad, cfg.width)
-            view_max_y = max(max_y + pad, cfg.height)
-
-            view_w = max(1e-6, view_max_x - view_min_x)
-            view_h = max(1e-6, view_max_y - view_min_y)
-
-        viewbox = f"{view_min_x} {view_min_y} {view_w} {view_h}"
+        
+        # Inkscape-friendly: viewBox matches document dimensions exactly
+        # so that 1 user unit = 1mm
+        viewbox = f"0 0 {cfg.width} {cfg.height}"
 
         dwg = svgwrite.Drawing(size=size, viewBox=viewbox)
 
@@ -195,8 +179,8 @@ class SVGWriter:
         if cfg.background:
             dwg.add(
                 dwg.rect(
-                    insert=(view_min_x, view_min_y),
-                    size=(view_w, view_h),
+                    insert=(0, 0),
+                    size=(cfg.width, cfg.height),
                     fill=cfg.background,
                 )
             )

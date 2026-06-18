@@ -11,6 +11,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -50,10 +51,20 @@ class NiceGuiState:
     hist_drag_target: str | None = None
     hist_source_width: int = 720
     using_default_input: bool = True
+    is_processing: bool = False
+    # Backdrop images for preview overlay (all at processed resolution)
+    backdrop_gradient: np.ndarray | None = None
+    backdrop_quantized: np.ndarray | None = None
+    backdrop_grayscale: np.ndarray | None = None
+    backdrop_original: np.ndarray | None = None  # Original RGB at processed resolution
+    # Processed image dimensions for SVG alignment
+    processed_width: int = 0
+    processed_height: int = 0
 
 
 HIST_WIDTH = 480
 HIST_HEIGHT = 150
+PREVIEW_CONTAINER_SIZE = 520  # Square preview container in pixels
 UI_STEP_LABELS = ["1. Image Processing", "2. Vector Generation"]
 DEFAULT_PREVIEW_WIDTH = "w-[420px]"
 PREVIEW_WIDTH_CLASSES = {
@@ -68,6 +79,28 @@ PAPER_SIZES_MM = {
     "A4": (210, 297),
     "A5": (148, 210),
     "A6": (105, 148),
+}
+# Rosé Pine color palette
+ROSEPINE_COLORS = {
+    "Rose": "#ebbcba",
+    "Pine": "#31748f",
+    "Foam": "#9ccfd8",
+    "Iris": "#c4a7e7",
+    "Gold": "#f6c177",
+    "Love": "#eb6f92",
+    "Text": "#e0def4",
+    "Subtle": "#908caa",
+    "Muted": "#6e6a86",
+    "Base": "#191724",
+    "Surface": "#1f1d2e",
+    "Overlay": "#26233a",
+}
+
+# Stroke colors for preview (includes Black/White + Rosé Pine)
+STROKE_COLORS = {
+    "Black": "#000000",
+    "White": "#ffffff",
+    **ROSEPINE_COLORS,
 }
 
 
@@ -240,6 +273,7 @@ def _build_settings_snapshot(controls: dict[str, Any]) -> dict[str, Any]:
         "algorithm",
         "color_theme",
         "paper_size",
+        "paper_orientation",
         "hist_min",
         "hist_mid",
         "hist_max",
@@ -276,27 +310,202 @@ def _build_settings_snapshot(controls: dict[str, Any]) -> dict[str, Any]:
     return {k: _safe_value(controls[k]) for k in keys}
 
 
-def _fit_svg_dimensions(svg_text: str, paper_size: str) -> str:
+def _fit_svg_dimensions(svg_text: str, paper_size: str, orientation: str = "Portrait") -> tuple[str, dict]:
+    """Scale SVG to fit paper size while preserving stroke widths.
+    
+    Directly scales path coordinates to fit the paper, keeping stroke-width
+    unchanged so the physical line thickness remains as specified.
+    Follows Inkscape convention: viewBox matches document mm dimensions.
+    
+    Returns:
+        Tuple of (transformed_svg, placement_info) where placement_info contains:
+        - offset_x, offset_y: centering offset in mm
+        - scaled_width, scaled_height: content size in mm
+        - paper_width, paper_height: paper dimensions in mm
+    """
+    placement_info = {}
     dims = PAPER_SIZES_MM.get(paper_size)
     if dims is None:
-        return svg_text
+        return svg_text, placement_info
 
-    match = re.search(r"<svg\b[^>]*>", svg_text)
-    if not match:
-        return svg_text
+    svg_match = re.search(r"<svg\b[^>]*>", svg_text)
+    if not svg_match:
+        return svg_text, placement_info
 
-    tag = match.group(0)
-    width_mm, height_mm = dims
+    svg_tag = svg_match.group(0)
+    # dims is (width, height) in portrait; swap for landscape
+    paper_width_mm, paper_height_mm = dims
+    if orientation == "Landscape":
+        paper_width_mm, paper_height_mm = paper_height_mm, paper_width_mm
 
-    def _set_attr(svg_tag: str, name: str, value: str) -> str:
+    placement_info["paper_width"] = paper_width_mm
+    placement_info["paper_height"] = paper_height_mm
+
+    # Extract current viewBox to get content bounds
+    viewbox_match = re.search(r'viewBox\s*=\s*["\']([^"\']+)["\']', svg_tag)
+    if not viewbox_match:
+        return svg_text, placement_info
+    
+    vb_parts = viewbox_match.group(1).split()
+    if len(vb_parts) != 4:
+        return svg_text, placement_info
+    
+    vb_min_x, vb_min_y, vb_width, vb_height = map(float, vb_parts)
+    if vb_width <= 0 or vb_height <= 0:
+        return svg_text, placement_info
+    
+    # Calculate scale to fit content in paper while maintaining aspect ratio
+    content_aspect = vb_width / vb_height
+    paper_aspect = paper_width_mm / paper_height_mm
+    
+    if content_aspect > paper_aspect:
+        # Content is wider - fit to paper width
+        scale = paper_width_mm / vb_width
+    else:
+        # Content is taller - fit to paper height  
+        scale = paper_height_mm / vb_height
+    
+    # Calculate offset to center content
+    scaled_width = vb_width * scale
+    scaled_height = vb_height * scale
+    offset_x = (paper_width_mm - scaled_width) / 2
+    offset_y = (paper_height_mm - scaled_height) / 2
+
+    placement_info["offset_x"] = offset_x
+    placement_info["offset_y"] = offset_y
+    placement_info["scaled_width"] = scaled_width
+    placement_info["scaled_height"] = scaled_height
+    placement_info["scale"] = scale
+
+    def _set_attr(tag: str, name: str, value: str) -> str:
         pattern = rf"\b{name}\s*=\s*(\"[^\"]*\"|'[^']*')"
-        if re.search(pattern, svg_tag):
-            return re.sub(pattern, f'{name}="{value}"', svg_tag, count=1)
-        return svg_tag[:-1] + f' {name}="{value}">'
+        if re.search(pattern, tag):
+            return re.sub(pattern, f'{name}="{value}"', tag, count=1)
+        return tag[:-1] + f' {name}="{value}">'
 
-    tag = _set_attr(tag, "width", f"{width_mm}mm")
-    tag = _set_attr(tag, "height", f"{height_mm}mm")
-    return svg_text[: match.start()] + tag + svg_text[match.end() :]
+    # Update document dimensions and viewBox to paper size
+    new_viewbox = f"0 0 {paper_width_mm} {paper_height_mm}"
+    new_svg_tag = _set_attr(svg_tag, "width", f"{paper_width_mm}mm")
+    new_svg_tag = _set_attr(new_svg_tag, "height", f"{paper_height_mm}mm")
+    new_svg_tag = _set_attr(new_svg_tag, "viewBox", new_viewbox)
+    
+    result = svg_text[: svg_match.start()] + new_svg_tag + svg_text[svg_match.end() :]
+    
+    # Scale path coordinates: transform each number in d="..." attributes
+    def scale_path_d(m):
+        d = m.group(1)
+        result_parts = []
+        i = 0
+        while i < len(d):
+            # Check for command letter
+            if d[i].isalpha():
+                result_parts.append(d[i])
+                i += 1
+            # Check for number (including negative and decimal)
+            elif d[i].isdigit() or d[i] == '-' or d[i] == '.':
+                # Extract the full number
+                j = i
+                if d[i] == '-':
+                    j += 1
+                while j < len(d) and (d[j].isdigit() or d[j] == '.'):
+                    j += 1
+                num_str = d[i:j]
+                try:
+                    val = float(num_str)
+                    scaled_val = val * scale
+                    result_parts.append(f"{scaled_val:.4f}")
+                except ValueError:
+                    result_parts.append(num_str)
+                i = j
+            else:
+                # Whitespace or comma - preserve as-is
+                result_parts.append(d[i])
+                i += 1
+        return f'd="{"".join(result_parts)}"'
+    
+    result = re.sub(r'd="([^"]+)"', scale_path_d, result)
+    
+    # Handle background rect separately - it should fill the entire paper
+    # Extract and remove original rect, replace with full-paper rect
+    bg_rect_match = re.search(r'<rect\b[^>]*fill="([^"]+)"[^>]*/?>(?:</rect>)?', result)
+    bg_fill = None
+    if bg_rect_match:
+        bg_fill = bg_rect_match.group(1)
+        result = result[:bg_rect_match.start()] + result[bg_rect_match.end():]
+    
+    # Add offset to center content using a wrapper group
+    # Find the closing </svg> and wrap content
+    svg_end_match = re.search(r"</svg\s*>", result)
+    if svg_end_match:
+        # Find where content starts (after opening svg tag)
+        new_svg_match = re.search(r"<svg\b[^>]*>", result)
+        if new_svg_match:
+            before = result[:new_svg_match.end()]
+            content = result[new_svg_match.end():svg_end_match.start()]
+            after = result[svg_end_match.start():]
+            
+            # Add full-paper background rect if there was one
+            bg_rect = ""
+            if bg_fill:
+                bg_rect = f'<rect x="0" y="0" width="{paper_width_mm}" height="{paper_height_mm}" fill="{bg_fill}"/>'
+            
+            # Wrap paths in translate group if needed
+            if abs(offset_x) > 0.01 or abs(offset_y) > 0.01:
+                result = before + bg_rect + f'<g transform="translate({offset_x:.4f},{offset_y:.4f})">' + content + '</g>' + after
+            else:
+                result = before + bg_rect + content + after
+    
+    return result, placement_info
+
+
+def _paper_size_icon_svg(size: str) -> str:
+    """Generate an SVG icon representing a paper size with relative dimensions."""
+    # Base sizes in px (A3 is largest) - portrait orientation
+    size_map = {
+        "A3": (60, 85),
+        "A4": (42, 60),
+        "A5": (30, 42),
+        "A6": (21, 30),
+    }
+    w, h = size_map.get(size, (42, 60))
+    
+    # Always use unselected styling; selection is handled via CSS classes
+    border_color = "#39414f"
+    bg_color = "#141a24"
+    border_width = "1"
+    
+    return (
+        f'<svg viewBox="0 0 {w + 4} {h + 4}" width="{w + 4}" height="{h + 4}" '
+        f'xmlns="http://www.w3.org/2000/svg">'
+        f'<rect x="2" y="2" width="{w}" height="{h}" fill="{bg_color}" '
+        f'stroke="{border_color}" stroke-width="{border_width}" rx="2"/>'
+        f'<text x="{(w + 4) / 2}" y="{(h + 4) / 2}" font-size="10" font-weight="bold" '
+        f'fill="#908caa" text-anchor="middle" dominant-baseline="middle">{size}</text>'
+        f'</svg>'
+    )
+
+
+def _orientation_icon_svg(orientation: str) -> str:
+    """Generate an SVG icon representing paper orientation."""
+    border_color = "#39414f"
+    bg_color = "#141a24"
+    
+    if orientation == "Portrait":
+        w, h = 24, 32
+    else:  # Landscape
+        w, h = 32, 24
+    
+    return (
+        f'<svg viewBox="0 0 {w + 8} {h + 8}" width="{w + 8}" height="{h + 8}" '
+        f'xmlns="http://www.w3.org/2000/svg">'
+        f'<rect x="4" y="4" width="{w}" height="{h}" fill="{bg_color}" '
+        f'stroke="{border_color}" stroke-width="1" rx="2"/>'
+        # Add line icon to indicate text direction
+        f'<line x1="8" y1="{4 + h//3}" x2="{w}" y2="{4 + h//3}" stroke="#6e6a86" stroke-width="1"/>'
+        f'<line x1="8" y1="{4 + h//2}" x2="{w - 4}" y2="{4 + h//2}" stroke="#6e6a86" stroke-width="1"/>'
+        f'<line x1="8" y1="{4 + 2*h//3}" x2="{w - 8}" y2="{4 + 2*h//3}" stroke="#6e6a86" stroke-width="1"/>'
+        f'</svg>'
+    )
 
 
 def _inject_svg_settings_metadata(svg_text: str, settings: dict[str, Any]) -> str:
@@ -348,6 +557,37 @@ def create_gui() -> None:
     algorithm_tiles: dict[str, Any] = {}
     theme_tiles: dict[str, Any] = {}
     vector_groups: dict[str, Any] = {}
+    paper_size_tiles: dict[str, Any] = {}
+    orientation_tiles: dict[str, Any] = {}
+    source_tiles: dict[str, Any] = {}
+    backdrop_tiles: dict[str, Any] = {}
+
+    def _update_backdrop_tile_styles() -> None:
+        selected = str(_safe_value(controls.get("preview_backdrop", _ValueProxy("Transparent"))))
+        for name, tile in backdrop_tiles.items():
+            if name == selected:
+                tile.classes(remove="st-source-tile", add="st-source-tile-active")
+            else:
+                tile.classes(remove="st-source-tile-active", add="st-source-tile")
+
+    def _set_backdrop(name: str) -> None:
+        controls["preview_backdrop"].set_value(name)
+        _update_svg_preview_html()
+
+    def _set_stroke_color(color: str) -> None:
+        controls["preview_stroke_color"].set_value(color)
+        _update_svg_preview_html()
+
+    def _update_source_tile_styles() -> None:
+        selected = str(_safe_value(controls.get("vector_source", _ValueProxy("levels"))))
+        for name, tile in source_tiles.items():
+            if name == selected:
+                tile.classes(remove="st-source-tile", add="st-source-tile-active")
+            else:
+                tile.classes(remove="st-source-tile-active", add="st-source-tile")
+
+    def _set_vector_source(name: str) -> None:
+        controls["vector_source"].set_value(name)
 
     def _update_algorithm_tile_styles() -> None:
         selected = str(_safe_value(controls.get("algorithm", _ValueProxy("spirals"))))
@@ -384,6 +624,30 @@ def create_gui() -> None:
     def _set_color_theme(name: str) -> None:
         controls["color_theme"].set_value(name)
 
+    def _update_paper_size_tile_styles() -> None:
+        selected = str(_safe_value(controls.get("paper_size", _ValueProxy("A4"))))
+        for name, tile in paper_size_tiles.items():
+            if name == selected:
+                tile.classes(remove="cursor-pointer", add="ring-2 ring-offset-1 ring-offset-[#141a24] ring-[#9ccfd8]")
+            else:
+                tile.classes(remove="ring-2 ring-offset-1 ring-offset-[#141a24] ring-[#9ccfd8]", add="cursor-pointer")
+
+    def _set_paper_size(name: str) -> None:
+        controls["paper_size"].set_value(name)
+        _update_paper_size_tile_styles()
+
+    def _update_orientation_tile_styles() -> None:
+        selected = str(_safe_value(controls.get("paper_orientation", _ValueProxy("Portrait"))))
+        for name, tile in orientation_tiles.items():
+            if name == selected:
+                tile.classes(remove="cursor-pointer", add="ring-2 ring-offset-1 ring-offset-[#141a24] ring-[#9ccfd8]")
+            else:
+                tile.classes(remove="ring-2 ring-offset-1 ring-offset-[#141a24] ring-[#9ccfd8]", add="cursor-pointer")
+
+    def _set_orientation(name: str) -> None:
+        controls["paper_orientation"].set_value(name)
+        _update_orientation_tile_styles()
+
     def _apply_preview_size() -> None:
         size = str(_safe_value(controls.get("preview_size", _ValueProxy("Medium"))))
         width_class = PREVIEW_WIDTH_CLASSES.get(size, DEFAULT_PREVIEW_WIDTH)
@@ -398,20 +662,187 @@ def create_gui() -> None:
                 outputs[key].classes(remove="w-[320px] w-[420px] w-[560px]", add=width_class)
 
     def _update_svg_preview_html() -> None:
-        zoom = int(_safe_value(controls.get("svg_zoom", _ValueProxy(100))))
-        svg_code = state.latest_svg_content or ""
-        if not svg_code.strip():
+        # Show processing message while generating vectors
+        if state.is_processing:
             outputs["svg_preview_html"].set_content(
-                '<div class="st-card" style="padding:12px; color:#aab5c8;">No SVG generated yet.</div>'
+                '<div class="st-card" style="width:100%; height:520px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px;">'
+                '<div style="font-size:48px;">⏳</div>'
+                '<div style="font-size:20px; font-weight:600; color:#9ccfd8;">Generating Vectors...</div>'
+                '<div style="font-size:14px; color:#908caa;">Processing your image (1-15 seconds)</div>'
+                '</div>'
             )
             return
 
-        svg_url = _svg_text_to_data_url(svg_code)
+        svg_code = state.latest_svg_content or ""
+        if not svg_code.strip():
+            outputs["svg_preview_html"].set_content(
+                '<div class="st-card" style="padding:12px; color:#908caa;">No SVG generated yet.</div>'
+            )
+            return
+
+        # Get backdrop preference
+        preview_backdrop = str(_safe_value(controls.get("preview_backdrop", _ValueProxy("Transparent"))))
+        
+        # Get paper size and orientation for proper scaling
+        paper_size = str(_safe_value(controls.get("paper_size", _ValueProxy("A4"))))
+        orientation = str(_safe_value(controls.get("paper_orientation", _ValueProxy("Portrait"))))
+        
+        # Calculate fit zoom based on paper dimensions and preview container
+        # Preview container is square (PREVIEW_CONTAINER_SIZE x PREVIEW_CONTAINER_SIZE)
+        paper_dims = PAPER_SIZES_MM.get(paper_size, (210, 297))
+        paper_w_mm, paper_h_mm = paper_dims
+        if orientation == "Landscape":
+            paper_w_mm, paper_h_mm = paper_h_mm, paper_w_mm
+        
+        # At zoom=100%, img width = container width, height scales by aspect
+        # For fit: we want both width and height to fit
+        # fit_zoom = min(100, 100 * container_h / (container_w * paper_h / paper_w))
+        # For square container: fit_zoom = min(100, 100 * paper_w / paper_h)
+        aspect = paper_h_mm / paper_w_mm
+        fit_zoom = min(100, int(100 / aspect)) if aspect > 1 else 100
+        
+        zoom = int(_safe_value(controls.get("svg_zoom", _ValueProxy(fit_zoom))))
+        
+        # Get backdrop image data URL if needed
+        backdrop_url = ""
+        if preview_backdrop in ("Original", "Grayscale", "Levels", "Gradient Magnitude"):
+            backdrop_img = None
+            if preview_backdrop == "Gradient Magnitude" and state.backdrop_gradient is not None:
+                backdrop_img = state.backdrop_gradient
+            elif preview_backdrop == "Levels" and state.backdrop_quantized is not None:
+                backdrop_img = state.backdrop_quantized
+            elif preview_backdrop == "Grayscale" and state.backdrop_grayscale is not None:
+                backdrop_img = state.backdrop_grayscale
+            elif preview_backdrop == "Original" and state.backdrop_original is not None:
+                backdrop_img = state.backdrop_original
+            
+            if backdrop_img is not None:
+                backdrop_url = _np_to_data_url(backdrop_img)
+        
+        # Scale SVG to paper dimensions - always use the same coordinate system
+        svg_for_preview, placement = _fit_svg_dimensions(svg_code, paper_size, orientation)
+        
+        # Interpolation: pixelated (nearest neighbor) vs smooth (auto/linear)
+        pixelated = bool(_safe_value(controls.get("pixelated", _ValueProxy(True))))
+        img_rendering = "pixelated" if pixelated else "auto"
+        
+        # Get positioning info
+        offset_x = placement.get("offset_x", 0) if placement else 0
+        offset_y = placement.get("offset_y", 0) if placement else 0
+        scale = placement.get("scale", 1) if placement else 1
+        paper_w = placement.get("paper_width", 210) if placement else 210
+        paper_h = placement.get("paper_height", 297) if placement else 297
+        
+        # Always remove original background rect (we'll add our own)
+        svg_for_preview = re.sub(r'<rect[^>]*fill="[^"]+"[^>]*/?>(?:</rect>)?', '', svg_for_preview)
+        
+        # Build background/backdrop element based on selection
+        backdrop_elem = ""
+        margin_adjust = 1 * scale if scale > 0 else 0
+        
+        # Checkerboard pattern definition (used as base for all non-transparent backdrops too)
+        checker_size = 4  # mm per checker square
+        checker_defs = (
+            f'<defs>'
+            f'<pattern id="checker" width="{checker_size * 2}" height="{checker_size * 2}" patternUnits="userSpaceOnUse">'
+            f'<rect width="{checker_size * 2}" height="{checker_size * 2}" fill="#2a2e38"/>'
+            f'<rect width="{checker_size}" height="{checker_size}" fill="#1e2228"/>'
+            f'<rect x="{checker_size}" y="{checker_size}" width="{checker_size}" height="{checker_size}" fill="#1e2228"/>'
+            f'</pattern>'
+            f'</defs>'
+        )
+        checker_rect = f'<rect x="0" y="0" width="{paper_w}" height="{paper_h}" fill="url(#checker)"/>'
+        
+        if preview_backdrop == "Transparent":
+            # Just checkerboard for entire paper
+            backdrop_elem = checker_defs + checker_rect
+        elif preview_backdrop in ("White", "Black") and state.processed_width > 0 and state.processed_height > 0 and scale > 0:
+            # Checkerboard base, then solid color only in image area
+            img_w_mm = state.processed_width * scale
+            img_h_mm = state.processed_height * scale
+            img_x = offset_x + margin_adjust
+            img_y = offset_y + margin_adjust
+            fill_color = "#ffffff" if preview_backdrop == "White" else "#000000"
+            backdrop_elem = (
+                checker_defs + checker_rect +
+                f'<rect x="{img_x:.4f}" y="{img_y:.4f}" width="{img_w_mm:.4f}" height="{img_h_mm:.4f}" fill="{fill_color}"/>'
+            )
+        elif preview_backdrop in ("White", "Black"):
+            # Fallback if no image dimensions - full paper solid color
+            fill_color = "#ffffff" if preview_backdrop == "White" else "#000000"
+            backdrop_elem = f'<rect x="0" y="0" width="{paper_w}" height="{paper_h}" fill="{fill_color}"/>'
+        elif backdrop_url and state.processed_width > 0 and state.processed_height > 0 and scale > 0:
+            # Image backdrop - checkerboard base + image
+            # All backdrops use same bounding box (processed dimensions)
+            # Original just has more pixels (full res) in that same area
+            img_w_mm = state.processed_width * scale
+            img_h_mm = state.processed_height * scale
+            img_x = offset_x + margin_adjust
+            img_y = offset_y + margin_adjust
+            
+            backdrop_elem = (
+                checker_defs + checker_rect +
+                f'<image href="{backdrop_url}" '
+                f'x="{img_x:.4f}" y="{img_y:.4f}" '
+                f'width="{img_w_mm:.4f}" height="{img_h_mm:.4f}" '
+                f'preserveAspectRatio="none" '
+                f'style="image-rendering:{img_rendering}"/>'
+            )
+        
+        # Insert backdrop after opening <svg> tag
+        if backdrop_elem:
+            svg_for_preview = re.sub(
+                r'(<svg\b[^>]*>)',
+                r'\1' + backdrop_elem,
+                svg_for_preview
+            )
+        
+        # Apply vector positioning shift for all backdrop types
+        # This ensures consistent positioning regardless of backdrop selection
+        # Apply same shift to all backdrops so vectors don't move when switching
+        if state.processed_width > 0 and state.processed_height > 0 and scale > 0:
+            pixel_shift = 0.5 * scale  # Always apply for consistency
+            total_shift = margin_adjust + pixel_shift
+            if total_shift > 0:
+                svg_for_preview = re.sub(
+                    r'transform="translate\(([0-9.-]+),([0-9.-]+)\)"',
+                    lambda m: f'transform="translate({float(m.group(1)) + total_shift:.4f},{float(m.group(2)) + total_shift:.4f})"',
+                    svg_for_preview
+                )
+        
+        # Apply custom stroke color if set
+        preview_color = str(_safe_value(controls.get("preview_stroke_color", _ValueProxy(""))))
+        if preview_color and preview_color in STROKE_COLORS:
+            hex_color = STROKE_COLORS[preview_color]
+            svg_for_preview = re.sub(r'stroke="[^"]+"', f'stroke="{hex_color}"', svg_for_preview)
+        
+        # Add page outline rectangle to show paper boundaries (insert at end so it's on top)
+        if placement:
+            paper_w = placement.get("paper_width", 0)
+            paper_h = placement.get("paper_height", 0)
+            if paper_w > 0 and paper_h > 0:
+                # Dashed outline to show page boundaries
+                page_outline = (
+                    f'<rect x="0" y="0" width="{paper_w}" height="{paper_h}" '
+                    f'fill="none" stroke="#908caa" stroke-width="0.5" '
+                    f'stroke-dasharray="2,2"/>'
+                )
+                # Insert before closing </svg> tag so it renders on top
+                svg_for_preview = re.sub(
+                    r'(</svg\s*>)',
+                    page_outline + r'\1',
+                    svg_for_preview
+                )
+        
+        svg_url = _svg_text_to_data_url(svg_for_preview)
+        
+        # Single consistent preview - just the SVG (with or without embedded backdrop)
+        # Square container for consistent viewing
         outputs["svg_preview_html"].set_content(
             "".join(
                 [
-                    '<div class="st-card" style="width:100%; height:520px; overflow:auto;">',
-                    f'<img src="{svg_url}" style="display:block; width:{zoom}%; max-width:none; height:auto;"/>',
+                    f'<div class="st-card" style="width:{PREVIEW_CONTAINER_SIZE}px; height:{PREVIEW_CONTAINER_SIZE}px; overflow:auto;">',
+                    f'<img src="{svg_url}" style="display:block; width:{zoom}%; max-width:none; height:auto; image-rendering:{img_rendering};"/>',
                     "</div>",
                 ]
             )
@@ -423,12 +854,21 @@ def create_gui() -> None:
         max_v: float,
         value: float,
         step: float,
+        label: str = "",
         classes: str = "w-full",
     ):
         precision = _slider_precision(step)
         with ui.column().classes(classes):
+            if label:
+                value_display = ui.label(f"{label}: {_format_slider_value(value, precision)}").classes(
+                    "text-sm font-medium"
+                )
             slider = ui.slider(min=min_v, max=max_v, value=value, step=step)
-            slider.props("label label-always")
+            if label:
+                def update_value_display():
+                    v = _safe_value(slider)
+                    value_display.set_text(f"{label}: {_format_slider_value(v, precision)}")
+                slider.on_value_change(update_value_display)
             with ui.row().classes("w-full justify-between items-center text-xs st-muted"):
                 ui.label(_format_slider_value(min_v, precision))
                 ui.label(_format_slider_value(max_v, precision))
@@ -453,7 +893,7 @@ def create_gui() -> None:
         max_v = float(np.percentile(gray, p_max))
         mid_v = 0.5 * (min_v + max_v)
         _sync_hist_controls(min_v, mid_v, max_v)
-        run_to_stage(1)
+        asyncio.create_task(run_to_stage(1))
 
     def _tone_from_hist_event(e) -> float:
         x = float(getattr(e, "image_x", 0.0))
@@ -493,14 +933,14 @@ def create_gui() -> None:
 
         if event_type in {"mouseup", "mouseleave", "touchend", "touchcancel"}:
             if state.hist_drag_target is not None:
-                run_to_stage(1)
+                asyncio.create_task(run_to_stage(1))
             state.hist_drag_target = None
             return
 
         if event_type == "click":
             target = _target_from_hist_event(e)
             _set_hist_target_value(target, _tone_from_hist_event(e))
-            run_to_stage(1)
+            asyncio.create_task(run_to_stage(1))
 
     def _set_default_visibility() -> None:
         if "default_group" in outputs:
@@ -524,9 +964,15 @@ def create_gui() -> None:
         outputs["input_name"].set_text("Input: default")
         state.pipeline_cache = {}
         update_input_preview()
-        run_to_stage(1)
+        asyncio.create_task(run_to_stage(1))
 
-    def run_to_stage(stage_index: int) -> None:
+    async def run_to_stage(stage_index: int) -> None:
+        state.is_processing = True
+        outputs["gen_vectors_spinner"].set_visibility(True)
+        outputs["gen_vectors_status"].set_visibility(True)
+        outputs["gen_vectors_btn"].enabled = False
+        _update_svg_preview_html()  # Show processing message immediately
+        await asyncio.sleep(0)  # Yield to allow UI to update
         (
             svg_preview,
             svg_code,
@@ -617,14 +1063,85 @@ def create_gui() -> None:
         outputs["preview_hist_downsampled"].set_source(_np_to_data_url(_downscale_for_ui(width_display)))
         outputs["preview_invert_levels"].set_source(_np_to_data_url(_downscale_for_ui(quantized)))
         outputs["preview_gradmag"].set_source(_np_to_data_url(_downscale_for_ui(gradient)))
-        outputs["svg_source"].value = _format_svg_code(svg_code)
-        _update_svg_preview_html()
+        
+        # Update source selector thumbnails in Vector tab
+        # "Levels" = quantized levels (dark = more marks if invert is on)
+        # "Inverted Levels" = inverted quantized (bright = more marks)
+        # "Gradient Magnitude" = edge detection result
+        if "source_thumb_levels" in outputs:
+            outputs["source_thumb_levels"].set_source(_np_to_data_url(_downscale_for_ui(quantized)))
+        if "source_thumb_inverted" in outputs and quantized is not None:
+            # Invert the quantized levels for the thumbnail
+            inverted_levels = 255 - np.asarray(quantized).astype(np.uint8)
+            outputs["source_thumb_inverted"].set_source(_np_to_data_url(_downscale_for_ui(inverted_levels)))
+        if "source_thumb_gradmag" in outputs:
+            outputs["source_thumb_gradmag"].set_source(_np_to_data_url(_downscale_for_ui(gradient)))
+        
+        # Update backdrop selector thumbnails
+        if "backdrop_thumb_grayscale" in outputs:
+            outputs["backdrop_thumb_grayscale"].set_source(_np_to_data_url(_downscale_for_ui(gray_display)))
+        if "backdrop_thumb_levels" in outputs:
+            outputs["backdrop_thumb_levels"].set_source(_np_to_data_url(_downscale_for_ui(quantized)))
+        if "backdrop_thumb_gradmag" in outputs:
+            outputs["backdrop_thumb_gradmag"].set_source(_np_to_data_url(_downscale_for_ui(gradient)))
+        if "backdrop_thumb_original" in outputs and state.input_image is not None:
+            outputs["backdrop_thumb_original"].set_source(_np_to_data_url(_downscale_for_ui(state.input_image)))
+        
+        # Store backdrop images for preview overlay
+        # All backdrops must be at the PROCESSED resolution (same as SVG coordinates)
+        # The gradient/quantized from the pipeline are resized to preview, so we need
+        # to get the actual processed-resolution data from the cache
+        processed = cache.get("processed")
+        if processed is not None:
+            state.processed_width = processed.width
+            state.processed_height = processed.height
+            
+            # Grayscale: resize original to processed dimensions
+            gray_resized = np.array(
+                Image.fromarray(gray_display).resize(
+                    (processed.width, processed.height),
+                    resample=getattr(getattr(Image, "Resampling", Image), "BILINEAR")
+                )
+            )
+            state.backdrop_grayscale = gray_resized
+            
+            # Original RGB: keep at native resolution (not resized)
+            # This allows seeing full-res original aligned with vectors
+            state.backdrop_original = state.input_image.copy() if state.input_image is not None else None
+            
+            # Quantized (levels): use processed.data at native resolution
+            quantized_native = to_display_uint8(processed.data, levels=processed.levels)
+            state.backdrop_quantized = quantized_native
+            
+            # Gradient magnitude: get from cache at native resolution
+            sigma_key = round(float(_safe_value(controls["gradient_sigma"])), 4)
+            gradients_by_sigma = cache.get("gradients_by_sigma", {})
+            gradients_data = gradients_by_sigma.get(sigma_key)
+            if gradients_data is not None:
+                gradient_native = to_display_uint8(gradients_data.magnitude)
+                state.backdrop_gradient = gradient_native
+            else:
+                state.backdrop_gradient = None
+        else:
+            state.backdrop_grayscale = gray_display
+            state.backdrop_gradient = gradient
+            state.backdrop_quantized = quantized
+            state.backdrop_original = state.input_image  # Use original input as fallback
+        
+        outputs["svg_source"].set_content(_format_svg_code(svg_code))
+        settings_snapshot = _build_settings_snapshot(controls)
+        outputs["settings_source"].set_content(json.dumps(settings_snapshot, indent=2))
 
         if svg_preview is None:
             state.latest_svg_content = ""
-            _update_svg_preview_html()
 
+        # Mark processing complete BEFORE updating preview so it shows the SVG, not "Processing..."
         state.current_stage = max(0, min(stage_index, len(PIPELINE_STEP_LABELS) - 1))
+        state.is_processing = False
+        outputs["gen_vectors_spinner"].set_visibility(False)
+        outputs["gen_vectors_status"].set_visibility(False)
+        outputs["gen_vectors_btn"].enabled = True
+        _update_svg_preview_html()
 
     async def on_open_image(e) -> None:
         try:
@@ -635,20 +1152,20 @@ def create_gui() -> None:
             outputs["input_name"].set_text(f"Input: {state.input_image_name}")
             state.pipeline_cache = {}
             update_input_preview()
-            run_to_stage(1)
+            await run_to_stage(1)
         except Exception as err:  # noqa: BLE001
             ui.notify(f"Failed to load image: {err}", color="negative")
 
     def on_run_one() -> None:
-        run_to_stage(min(state.current_stage + 1, len(PIPELINE_STEP_LABELS) - 1))
+        asyncio.create_task(run_to_stage(min(state.current_stage + 1, len(PIPELINE_STEP_LABELS) - 1)))
 
     def on_run_selected() -> None:
         step_label = str(_safe_value(controls.get("target_step", _ValueProxy(UI_STEP_LABELS[0]))))
         target_stage = 1 if step_label == UI_STEP_LABELS[0] else len(PIPELINE_STEP_LABELS) - 1
-        run_to_stage(target_stage)
+        asyncio.create_task(run_to_stage(target_stage))
 
     def on_run_all() -> None:
-        run_to_stage(len(PIPELINE_STEP_LABELS) - 1)
+        asyncio.create_task(run_to_stage(len(PIPELINE_STEP_LABELS) - 1))
 
     def download_svg() -> None:
         if not state.latest_svg_content:
@@ -656,7 +1173,8 @@ def create_gui() -> None:
             return
         try:
             paper_size = str(_safe_value(controls.get("paper_size", _ValueProxy("A4"))))
-            svg_to_save = _fit_svg_dimensions(state.latest_svg_content, paper_size)
+            orientation = str(_safe_value(controls.get("paper_orientation", _ValueProxy("Portrait"))))
+            svg_to_save, _ = _fit_svg_dimensions(state.latest_svg_content, paper_size, orientation)
             base = _build_download_base_name(
                 state.input_image_name,
                 str(_safe_value(controls.get("algorithm", _ValueProxy("spirals")))),
@@ -680,27 +1198,10 @@ def create_gui() -> None:
         except Exception as err:  # noqa: BLE001
             ui.notify(f"Failed to download settings: {err}", color="negative")
 
-    def save_preset() -> None:
-        path = str(_safe_value(controls["preset_path"]) or "").strip()
-        if not path:
-            ui.notify("Set a preset path first.", color="warning")
-            return
-        payload = {"version": 1, "settings": _build_settings_snapshot(controls)}
+    async def on_load_preset(e) -> None:
         try:
-            out = Path(path)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            ui.notify(f"Saved preset: {out}", color="positive")
-        except Exception as err:  # noqa: BLE001
-            ui.notify(f"Failed to save preset: {err}", color="negative")
-
-    def load_preset() -> None:
-        path = str(_safe_value(controls["preset_path"]) or "").strip()
-        if not path:
-            ui.notify("Set a preset path first.", color="warning")
-            return
-        try:
-            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            content = await e.file.read()
+            payload = json.loads(content.decode("utf-8"))
             settings = payload.get("settings", payload)
             if not isinstance(settings, dict):
                 raise ValueError("Preset must contain a JSON object")
@@ -710,8 +1211,8 @@ def create_gui() -> None:
                     controls[key].set_value(value)
 
             state.pipeline_cache = {}
-            run_to_stage(state.current_stage)
-            ui.notify(f"Loaded preset: {path}", color="positive")
+            await run_to_stage(state.current_stage)
+            ui.notify(f"Loaded preset: {e.file.name}", color="positive")
         except Exception as err:  # noqa: BLE001
             ui.notify(f"Failed to load preset: {err}", color="negative")
 
@@ -721,12 +1222,27 @@ def create_gui() -> None:
             body { background: radial-gradient(circle at 20% 0%, #1f2430 0%, #11151c 60%, #0b0e13 100%); }
             .st-card { border: 1px solid #39414f; border-radius: 10px; background: #141a24; }
       .st-title { font-weight: 700; font-size: 1.2rem; }
-            .st-muted { color: #aab5c8; }
+            .st-muted { color: #908caa; }
                         .st-code textarea {
                             font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace !important;
                             font-size: 12px;
                             line-height: 1.4;
                             white-space: pre;
+                        }
+                        /* Tab styling - better active tab highlighting */
+                        .q-tab--active {
+                            background: linear-gradient(135deg, #1c2a34 0%, #192530 100%) !important;
+                            border-left: 3px solid #9ccfd8 !important;
+                            color: #e0def4 !important;
+                            font-weight: 600 !important;
+                        }
+                        .q-tab {
+                            border-left: 3px solid transparent;
+                            transition: all 0.2s ease;
+                        }
+                        .q-tab:hover:not(.q-tab--active) {
+                            background: #1a2028 !important;
+                            border-left: 3px solid #39414f;
                         }
                         .st-alg-tile {
                             border: 1px solid #39414f;
@@ -758,16 +1274,59 @@ def create_gui() -> None:
                             cursor: pointer;
                             box-shadow: 0 0 0 1px rgba(196, 167, 231, 0.25) inset;
                         }
+                        .st-source-tile {
+                            border: 2px solid #39414f;
+                            border-radius: 8px;
+                            background: #141a24;
+                            padding: 4px;
+                            cursor: pointer;
+                            transition: all 0.15s ease;
+                        }
+                        .st-source-tile:hover {
+                            border-color: #56526e;
+                        }
+                        .st-source-tile-active {
+                            border: 2px solid #f6c177;
+                            border-radius: 8px;
+                            background: #2a2418;
+                            padding: 4px;
+                            cursor: pointer;
+                            box-shadow: 0 0 8px rgba(246, 193, 119, 0.3);
+                        }
+                        .st-tabs-sticky {
+                            position: sticky;
+                            top: 16px;
+                            align-self: flex-start;
+                            z-index: 100;
+                        }
     </style>
     """
     )
 
-    ui.dark_mode().enable()
+    # Set Rosé Pine colors for UI elements
+    ui.colors(
+        primary="#31748f",    # Pine - primary actions (buttons, sliders)
+        secondary="#c4a7e7",  # Subtle - secondary elements
+        positive="#9ccfd8",   # Foam - success/download actions
+    )
 
-    ui.label("ScribbleTrace NiceGUI").classes("st-title")
+    dark_mode = ui.dark_mode()
+    dark_mode.enable()
+
+    with ui.row().classes("w-full justify-between items-center mb-4"):
+        ui.label("ScribbleTrace NiceGUI").classes("st-title")
+        with ui.row().classes("items-center gap-2"):
+            outputs["dark_mode_toggle"] = ui.button(icon="dark_mode").props("flat round")
+            def toggle_dark_mode():
+                dark_mode.toggle()
+                if dark_mode.value:
+                    outputs["dark_mode_toggle"].props(remove="icon=light_mode", add="icon=dark_mode")
+                else:
+                    outputs["dark_mode_toggle"].props(remove="icon=dark_mode", add="icon=light_mode")
+            outputs["dark_mode_toggle"].on_click(toggle_dark_mode)
 
     with ui.row().classes("w-full items-start no-wrap gap-4"):
-        with ui.tabs().props("vertical").classes("w-[180px] st-card p-2") as tabs:
+        with ui.tabs().props("vertical").classes("w-[180px] st-card p-2 st-tabs-sticky") as tabs:
             tab_input = ui.tab("Input").props("icon=upload")
             tab_processing = ui.tab("Proc").props("icon=tune")
             tab_vector = ui.tab("Vector").props("icon=gesture")
@@ -806,14 +1365,9 @@ def create_gui() -> None:
                                     "w-[320px] max-w-full st-card"
                                 )
 
-                    controls["preset_path"] = ui.input("Preset Path", value="scribbletrace_preset.json").classes("w-full")
-                    with ui.row().classes("w-full gap-2"):
-                        ui.button("Save Preset", on_click=save_preset)
-                        ui.button("Load Preset", on_click=load_preset)
-
-                    with ui.row().classes("w-full gap-2"):
-                        ui.button("Run Image Processing", on_click=lambda: run_to_stage(1))
-                        ui.button("Run Full Pipeline", on_click=lambda: run_to_stage(2))
+                    with ui.row().classes("w-full gap-2 items-center"):
+                        ui.button("Save Preset", icon="save", on_click=download_settings)
+                        ui.upload(on_upload=on_load_preset, auto_upload=True, label="Load Preset").props('accept=".json"').classes("max-w-[200px]")
 
             with ui.tab_panel(tab_processing):
                 with ui.column().classes("w-full gap-3"):
@@ -836,7 +1390,7 @@ def create_gui() -> None:
                                 ["min", "mid", "max"],
                                 value="mid",
                             ).props("dense")
-                            controls["hist_target"].on_value_change(lambda _: run_to_stage(1))
+                            controls["hist_target"].on_value_change(lambda _: asyncio.create_task(run_to_stage(1)))
                             ui.label("Click histogram to place selected marker").classes("st-muted")
                             outputs["hist_marker_info"] = ui.label("Active marker: MID").classes("st-muted")
                             outputs["histogram"] = ui.interactive_image(
@@ -862,19 +1416,20 @@ def create_gui() -> None:
 
                         with ui.column().classes("min-w-[280px] max-w-[420px] gap-2"):
                             ui.label("Image Processing Settings").classes("st-title")
-                            ui.label("Output Width").classes("st-muted")
-                            controls["output_width"] = _slider_with_readout(min_v=10, max_v=200, value=40, step=1)
-                            controls["output_width"].on_value_change(lambda _: run_to_stage(1))
-                            ui.label("Levels").classes("st-muted")
-                            controls["levels"] = _slider_with_readout(min_v=2, max_v=16, value=7, step=1)
-                            controls["levels"].on_value_change(lambda _: run_to_stage(1))
-                            controls["invert"] = ui.switch("Invert", value=True)
-                            controls["invert"].on_value_change(lambda _: run_to_stage(1))
-                            ui.label("Gaussian Gradient Magnitude Sigma").classes("st-muted")
-                            controls["gradient_sigma"] = _slider_with_readout(
-                                min_v=0.0, max_v=6.0, value=1.0, step=0.1
+                            controls["output_width"] = _slider_with_readout(
+                                label="Output Width", min_v=10, max_v=200, value=40, step=1
                             )
-                            controls["gradient_sigma"].on_value_change(lambda _: run_to_stage(1))
+                            controls["output_width"].on_value_change(lambda _: asyncio.create_task(run_to_stage(1)))
+                            controls["levels"] = _slider_with_readout(
+                                label="Levels", min_v=2, max_v=16, value=7, step=1
+                            )
+                            controls["levels"].on_value_change(lambda _: asyncio.create_task(run_to_stage(1)))
+                            controls["invert"] = ui.switch("Invert", value=True)
+                            controls["invert"].on_value_change(lambda _: asyncio.create_task(run_to_stage(1)))
+                            controls["gradient_sigma"] = _slider_with_readout(
+                                label="Gaussian Gradient Magnitude Sigma", min_v=0.0, max_v=6.0, value=1.0, step=0.1
+                            )
+                            controls["gradient_sigma"].on_value_change(lambda _: asyncio.create_task(run_to_stage(1)))
 
                     ui.separator()
                     ui.label("Image Processing Previews").classes("st-title")
@@ -920,9 +1475,34 @@ def create_gui() -> None:
                             algorithm_tiles[name] = tile
                     _update_algorithm_tile_styles()
 
+                    # Source data selector - clickable thumbnails from processing step
+                    controls["vector_source"] = _ValueProxy(
+                        "levels", on_change=lambda _: _update_source_tile_styles()
+                    )
+                    ui.label("Source Data (for vector generation)").classes("st-muted")
+                    with ui.row().classes("w-full gap-4 items-end"):
+                        with ui.column().classes("items-center gap-1 st-source-tile") as levels_tile:
+                            outputs["source_thumb_levels"] = ui.image().classes("w-[120px] h-[90px] object-cover")
+                            ui.label("Levels").classes("st-muted text-sm")
+                        levels_tile.on("click", lambda _e: _set_vector_source("levels"))
+                        source_tiles["levels"] = levels_tile
+                        
+                        with ui.column().classes("items-center gap-1 st-source-tile") as inverted_tile:
+                            outputs["source_thumb_inverted"] = ui.image().classes("w-[120px] h-[90px] object-cover")
+                            ui.label("Inverted Levels").classes("st-muted text-sm")
+                        inverted_tile.on("click", lambda _e: _set_vector_source("inverted"))
+                        source_tiles["inverted"] = inverted_tile
+                        
+                        with ui.column().classes("items-center gap-1 st-source-tile") as gradmag_tile:
+                            outputs["source_thumb_gradmag"] = ui.image().classes("w-[120px] h-[90px] object-cover")
+                            ui.label("Gradient Magnitude").classes("st-muted text-sm")
+                        gradmag_tile.on("click", lambda _e: _set_vector_source("gradmag"))
+                        source_tiles["gradmag"] = gradmag_tile
+                    _update_source_tile_styles()
+
                     with ui.row().classes("w-full gap-4"):
                         controls["color_theme"] = _ValueProxy(
-                            "Black Lines on White", on_change=lambda _: _update_theme_tile_styles()
+                            "White Lines on Black", on_change=lambda _: _update_theme_tile_styles()
                         )
 
                     ui.label("SVG Theme").classes("st-muted")
@@ -954,14 +1534,32 @@ def create_gui() -> None:
                         theme_tiles["White Lines on Black"] = dark_tile
                     _update_theme_tile_styles()
 
-                    ui.label("Line Width (mm)").classes("st-muted")
-                    controls["stroke_width"] = _slider_with_readout(min_v=0.01, max_v=2.0, value=0.5, step=0.01)
-
-                    controls["paper_size"] = ui.select(
-                        ["A3", "A4", "A5", "A6"],
-                        value="A4",
-                        label="Fit SVG drawing in",
-                    ).classes("w-[240px]")
+                    with ui.column().classes("st-card p-3 gap-2"):
+                        ui.label("General SVG Settings").classes("st-title")
+                        controls["stroke_width"] = _slider_with_readout(
+                            label="Line Width (mm)", min_v=0.01, max_v=2.0, value=0.2, step=0.001
+                        )
+                        ui.label("Fit SVG drawing in").classes("st-muted text-sm")
+                        with ui.row().classes("gap-2 items-center justify-start"):
+                            controls["paper_size"] = _ValueProxy("A4")
+                            for size in ["A3", "A4", "A5", "A6"]:
+                                tile = ui.html(_paper_size_icon_svg(size)).classes(
+                                    "cursor-pointer"
+                                )
+                                tile.on("click", lambda s=size: _set_paper_size(s))
+                                paper_size_tiles[size] = tile
+                            _update_paper_size_tile_styles()
+                        
+                        ui.label("Orientation").classes("st-muted text-sm")
+                        with ui.row().classes("gap-3 items-center justify-start"):
+                            controls["paper_orientation"] = _ValueProxy("Portrait")
+                            for orient in ["Portrait", "Landscape"]:
+                                tile = ui.html(_orientation_icon_svg(orient)).classes(
+                                    "cursor-pointer"
+                                )
+                                tile.on("click", lambda o=orient: _set_orientation(o))
+                                orientation_tiles[orient] = tile
+                            _update_orientation_tile_styles()
 
                     ui.label("Vector Settings Matrix").classes("st-muted")
                     with ui.row().classes("w-full gap-3 items-start flex-wrap"):
@@ -979,17 +1577,21 @@ def create_gui() -> None:
                         with ui.column().classes("st-card p-3 gap-2 min-w-[320px] max-w-[420px]"):
                             ui.label("Shared Randomness").classes("st-title")
                             controls["randomness_vertex"] = _slider_with_readout(
-                                min_v=0.0, max_v=1.0, value=0.0, step=0.01
+                                label="Vertex Randomness", min_v=0.0, max_v=1.0, value=0.0, step=0.01
                             )
                             controls["randomness_position"] = _slider_with_readout(
-                                min_v=0.0, max_v=1.0, value=0.0, step=0.01
+                                label="Position Randomness", min_v=0.0, max_v=1.0, value=0.0, step=0.01
                             )
 
                         vector_groups["spirals"] = ui.column().classes("st-card p-3 gap-2 min-w-[320px] max-w-[420px]")
                         with vector_groups["spirals"]:
                             ui.label("Spirals Settings").classes("st-title")
-                            controls["theta_resolution"] = _slider_with_readout(min_v=16, max_v=360, value=60, step=1)
-                            controls["spiral_b"] = _slider_with_readout(min_v=0.1, max_v=3.0, value=1.0, step=0.1)
+                            controls["theta_resolution"] = _slider_with_readout(
+                                label="Theta Resolution", min_v=16, max_v=360, value=60, step=1
+                            )
+                            controls["spiral_b"] = _slider_with_readout(
+                                label="Spiral B", min_v=0.1, max_v=3.0, value=1.0, step=0.1
+                            )
                             controls["connect_cells"] = ui.switch("Connect Cells", value=True)
 
                         vector_groups["circles_squares"] = ui.column().classes(
@@ -997,38 +1599,45 @@ def create_gui() -> None:
                         )
                         with vector_groups["circles_squares"]:
                             ui.label("Circles/Squares Settings").classes("st-title")
-                            controls["circle_points"] = _slider_with_readout(min_v=12, max_v=72, value=36, step=1)
+                            controls["circle_points"] = _slider_with_readout(
+                                label="Circle Points", min_v=3, max_v=72, value=36, step=1
+                            )
                             controls["small_first"] = ui.switch("Small First", value=True)
 
                         vector_groups["lines"] = ui.column().classes("st-card p-3 gap-2 min-w-[320px] max-w-[420px]")
                         with vector_groups["lines"]:
                             ui.label("Lines Settings").classes("st-title")
                             controls["lines_segment_length"] = _slider_with_readout(
-                                min_v=0.1, max_v=5.0, value=1.0, step=0.1
+                                label="Segment Length", min_v=0.1, max_v=5.0, value=1.0, step=0.1
                             )
                             controls["randomness_length"] = _slider_with_readout(
-                                min_v=0.0, max_v=1.0, value=0.0, step=0.01
+                                label="Randomness", min_v=0.0, max_v=1.0, value=0.0, step=0.01
                             )
                             controls["min_gradient_scale"] = _slider_with_readout(
-                                min_v=0.01, max_v=1.0, value=0.1, step=0.01
+                                label="Min Gradient Scale", min_v=0.01, max_v=1.0, value=0.1, step=0.01
                             )
                             controls["max_gradient_scale"] = _slider_with_readout(
-                                min_v=1.0, max_v=20.0, value=10.0, step=0.5
+                                label="Max Gradient Scale", min_v=1.0, max_v=20.0, value=10.0, step=0.5
                             )
 
                         vector_groups["curves"] = ui.column().classes("st-card p-3 gap-2 min-w-[320px] max-w-[420px]")
                         with vector_groups["curves"]:
                             ui.label("Curves Settings").classes("st-title")
                             controls["curves_segment_length"] = _slider_with_readout(
-                                min_v=0.1, max_v=5.0, value=1.0, step=0.1
+                                label="Segment Length", min_v=0.1, max_v=5.0, value=1.0, step=0.1
                             )
                             controls["curves_randomness_length"] = _slider_with_readout(
-                                min_v=0.0, max_v=1.0, value=0.0, step=0.01
+                                label="Randomness", min_v=0.0, max_v=1.0, value=0.0, step=0.01
                             )
-                            ui.label("Max Steps").classes("st-muted")
-                            controls["max_steps"] = _slider_with_readout(min_v=1, max_v=20, value=4, step=1)
-                            controls["step_size"] = _slider_with_readout(min_v=0.5, max_v=5.0, value=2.0, step=0.1)
-                            controls["bezier_samples"] = _slider_with_readout(min_v=5, max_v=50, value=15, step=1)
+                            controls["max_steps"] = _slider_with_readout(
+                                label="Max Steps", min_v=1, max_v=20, value=4, step=1
+                            )
+                            controls["step_size"] = _slider_with_readout(
+                                label="Step Size", min_v=0.5, max_v=5.0, value=2.0, step=0.1
+                            )
+                            controls["bezier_samples"] = _slider_with_readout(
+                                label="Bezier Samples", min_v=5, max_v=50, value=15, step=1
+                            )
 
                         vector_groups["hatching"] = ui.column().classes("st-card p-3 gap-2 min-w-[320px] max-w-[420px]")
                         with vector_groups["hatching"]:
@@ -1037,31 +1646,148 @@ def create_gui() -> None:
                             controls["hatch_vertical"] = ui.switch("Vertical", value=False)
                             controls["hatch_diag_right"] = ui.switch("Diagonal Right", value=True)
                             controls["hatch_diag_left"] = ui.switch("Diagonal Left", value=False)
-                            controls["min_spacing"] = _slider_with_readout(min_v=0.1, max_v=2.0, value=0.3, step=0.1)
-                            controls["max_spacing"] = _slider_with_readout(min_v=0.5, max_v=5.0, value=2.0, step=0.1)
+                            controls["min_spacing"] = _slider_with_readout(
+                                label="Min Spacing", min_v=0.1, max_v=2.0, value=0.3, step=0.1
+                            )
+                            controls["max_spacing"] = _slider_with_readout(
+                                label="Max Spacing", min_v=0.5, max_v=5.0, value=2.0, step=0.1
+                            )
 
                     _update_vector_setting_visibility()
 
-                    ui.button("Generate Vectors", on_click=lambda: run_to_stage(2))
-                    ui.label("SVG Preview").classes("st-muted")
-                    controls["svg_zoom"] = _slider_with_readout(min_v=50, max_v=300, value=100, step=5)
-                    controls["svg_zoom"].on_value_change(lambda _: _update_svg_preview_html())
+                    with ui.row().classes("w-full items-center gap-4"):
+                        outputs["gen_vectors_btn"] = ui.button(
+                            "Generate Vectors", on_click=lambda: asyncio.create_task(run_to_stage(2))
+                        ).classes("grow")
+                        with ui.row().classes("items-center gap-2"):
+                            outputs["gen_vectors_spinner"] = ui.spinner(size="xl").set_visibility(False)
+                            outputs["gen_vectors_status"] = ui.label("Processing...").classes("st-muted").set_visibility(False)
+                    with ui.row().classes("w-full items-center gap-2"):
+                        controls["svg_zoom"] = _slider_with_readout(
+                            label="Zoom", min_v=25, max_v=400, value=70, step=5
+                        )
+                        controls["svg_zoom"].on_value_change(lambda _: _update_svg_preview_html())
+                        
+                        def _set_zoom_fit():
+                            paper_size = str(_safe_value(controls.get("paper_size", _ValueProxy("A4"))))
+                            orientation = str(_safe_value(controls.get("paper_orientation", _ValueProxy("Portrait"))))
+                            paper_dims = PAPER_SIZES_MM.get(paper_size, (210, 297))
+                            pw, ph = paper_dims
+                            if orientation == "Landscape":
+                                pw, ph = ph, pw
+                            fit = min(100, int(100 * pw / ph)) if ph > pw else 100
+                            controls["svg_zoom"].set_value(fit)
+                        
+                        ui.button("Fit", on_click=_set_zoom_fit).props("flat dense").classes("text-xs")
+                        ui.button("100%", on_click=lambda: controls["svg_zoom"].set_value(100)).props("flat dense").classes("text-xs")
+                        ui.button("200%", on_click=lambda: controls["svg_zoom"].set_value(200)).props("flat dense").classes("text-xs")
+                    
+                    # Preview Background selector with thumbnails
+                    controls["preview_backdrop"] = _ValueProxy(
+                        "Transparent", on_change=lambda _: _update_backdrop_tile_styles()
+                    )
+                    ui.label("Preview Background").classes("st-muted")
+                    with ui.row().classes("w-full gap-3 items-end"):
+                        # Transparent checkerboard
+                        with ui.column().classes("items-center gap-1 st-source-tile") as trans_tile:
+                            ui.html(
+                                '<svg viewBox="0 0 80 60" width="80" height="60">'
+                                '<defs><pattern id="chk" width="10" height="10" patternUnits="userSpaceOnUse">'
+                                '<rect width="10" height="10" fill="#2a2e38"/>'
+                                '<rect width="5" height="5" fill="#1e2228"/>'
+                                '<rect x="5" y="5" width="5" height="5" fill="#1e2228"/>'
+                                '</pattern></defs>'
+                                '<rect width="80" height="60" fill="url(#chk)"/>'
+                                '</svg>'
+                            )
+                            ui.label("Transparent").classes("st-muted text-xs")
+                        trans_tile.on("click", lambda _e: _set_backdrop("Transparent"))
+                        backdrop_tiles["Transparent"] = trans_tile
+                        
+                        # White
+                        with ui.column().classes("items-center gap-1 st-source-tile") as white_tile:
+                            ui.html(
+                                '<svg viewBox="0 0 80 60" width="80" height="60">'
+                                '<rect width="80" height="60" fill="#ffffff"/>'
+                                '</svg>'
+                            )
+                            ui.label("White").classes("st-muted text-xs")
+                        white_tile.on("click", lambda _e: _set_backdrop("White"))
+                        backdrop_tiles["White"] = white_tile
+                        
+                        # Black
+                        with ui.column().classes("items-center gap-1 st-source-tile") as black_tile:
+                            ui.html(
+                                '<svg viewBox="0 0 80 60" width="80" height="60">'
+                                '<rect width="80" height="60" fill="#000000" stroke="#39414f" stroke-width="1"/>'
+                                '</svg>'
+                            )
+                            ui.label("Black").classes("st-muted text-xs")
+                        black_tile.on("click", lambda _e: _set_backdrop("Black"))
+                        backdrop_tiles["Black"] = black_tile
+                        
+                        # Grayscale
+                        with ui.column().classes("items-center gap-1 st-source-tile") as gray_tile:
+                            outputs["backdrop_thumb_grayscale"] = ui.image().classes("w-[80px] h-[60px] object-cover")
+                            ui.label("Grayscale").classes("st-muted text-xs")
+                        gray_tile.on("click", lambda _e: _set_backdrop("Grayscale"))
+                        backdrop_tiles["Grayscale"] = gray_tile
+                        
+                        # Levels
+                        with ui.column().classes("items-center gap-1 st-source-tile") as levels_tile:
+                            outputs["backdrop_thumb_levels"] = ui.image().classes("w-[80px] h-[60px] object-cover")
+                            ui.label("Levels").classes("st-muted text-xs")
+                        levels_tile.on("click", lambda _e: _set_backdrop("Levels"))
+                        backdrop_tiles["Levels"] = levels_tile
+                        
+                        # Gradient Magnitude
+                        with ui.column().classes("items-center gap-1 st-source-tile") as gradmag_tile:
+                            outputs["backdrop_thumb_gradmag"] = ui.image().classes("w-[80px] h-[60px] object-cover")
+                            ui.label("Grad Mag").classes("st-muted text-xs")
+                        gradmag_tile.on("click", lambda _e: _set_backdrop("Gradient Magnitude"))
+                        backdrop_tiles["Gradient Magnitude"] = gradmag_tile
+                        
+                        # Original (RGB)
+                        with ui.column().classes("items-center gap-1 st-source-tile") as orig_tile:
+                            outputs["backdrop_thumb_original"] = ui.image().classes("w-[80px] h-[60px] object-cover")
+                            ui.label("Original").classes("st-muted text-xs")
+                        orig_tile.on("click", lambda _e: _set_backdrop("Original"))
+                        backdrop_tiles["Original"] = orig_tile
+                    _update_backdrop_tile_styles()
+                    
+                    with ui.row().classes("w-full items-center gap-2"):
+                        controls["pixelated"] = ui.switch("Pixelated", value=True)
+                        controls["pixelated"].on_value_change(lambda _: _update_svg_preview_html())
+                    
+                    # Preview Stroke Color - clickable swatches
+                    controls["preview_stroke_color"] = _ValueProxy("")
+                    ui.label("Preview Stroke Color").classes("st-muted")
+                    with ui.row().classes("gap-1 flex-wrap"):
+                        for name, hex_color in STROKE_COLORS.items():
+                            # Add border for visibility on dark colors
+                            border = "border:1px solid #39414f;" if hex_color in ("#000000", "#191724", "#1f1d2e", "#26233a") else ""
+                            ui.html(
+                                f'<div style="width:24px; height:24px; background:{hex_color}; '
+                                f'border-radius:4px; cursor:pointer; {border}" title="{name}"></div>'
+                            ).on("click", lambda _, n=name: _set_stroke_color(n))
+                    
                     outputs["svg_preview_html"] = ui.html().classes("w-full")
 
                     with ui.row().classes("w-full gap-2"):
                         ui.button("Download SVG", icon="download", on_click=download_svg).props(
                             "color=positive unelevated"
-                        ).classes("grow text-white")
+                        ).classes("grow")
                         ui.button("Download Settings", icon="tune", on_click=download_settings).props(
                             "color=secondary unelevated"
                         ).classes("grow")
-                    outputs["svg_source"] = ui.textarea(label="SVG Source").props("rows=18 readonly").classes(
-                        "w-full st-code"
-                    )
+                    with ui.expansion("SVG Source", icon="code").classes("w-full"):
+                        outputs["svg_source"] = ui.code("", language="xml").classes("w-full")
+                    with ui.expansion("Settings Source", icon="tune").classes("w-full"):
+                        outputs["settings_source"] = ui.code("", language="json").classes("w-full")
 
     # Initial defaults and first run.
     update_input_preview()
-    run_to_stage(1)
+    ui.timer(0.1, lambda: asyncio.create_task(run_to_stage(1)), once=True)
 
 
 def main() -> None:
