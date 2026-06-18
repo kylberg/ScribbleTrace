@@ -12,6 +12,7 @@ ScribbleTrace transforms raster images (photos, artwork) into vector graphics (S
 - **Intensity-based rendering**: Darker areas produce denser patterns
 - **Pen plotter optimized**: Minimizes pen lifts and travel distance
 - **Clean SVG output**: Using the industry-standard svgwrite library
+- **Interactive web GUI**: Real-time preview with NiceGUI
 - **Modern Python**: Type hints, dataclasses, Python 3.10+
 - **Easy to extend**: Add your own algorithms by subclassing `Algorithm`
 
@@ -39,6 +40,7 @@ pip install -e .
 - scipy
 - svgwrite
 - Pillow
+- nicegui (for the web GUI)
 
 ## Quick Start
 
@@ -60,6 +62,22 @@ scribbletrace photo.jpg output.svg --algorithm hatching --cross-hatch
 # See all options
 scribbletrace --help
 ```
+
+### Web GUI
+
+Launch the interactive web interface:
+
+```bash
+scribbletrace-gui
+```
+
+Opens a browser at `http://localhost:8080` with:
+
+- **Input tab** — Image gallery with default sample; upload your own images
+- **Proc tab** — Histogram adjustment, output width, levels, and live preview of processing stages
+- **Vector tab** — Algorithm selection, parameter tuning, paper size/orientation, and SVG preview with zoom and backdrop options
+
+The GUI supports saving/loading presets (JSON) and downloading the generated SVG.
 
 ### Python API
 
