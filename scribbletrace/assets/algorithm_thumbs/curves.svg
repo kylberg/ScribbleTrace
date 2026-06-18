@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 120 120"
+   version="1.1"
+   id="svg930"
+   sodipodi:docname="curves.svg"
+   inkscape:version="1.2.1 (9c6d41e410, 2022-07-14)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs934" />
+  <sodipodi:namedview
+     id="namedview932"
+     pagecolor="#ffffff"
+     bordercolor="#999999"
+     borderopacity="1"
+     inkscape:showpageshadow="0"
+     inkscape:pageopacity="0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     showgrid="false"
+     inkscape:zoom="8.775"
+     inkscape:cx="35.156695"
+     inkscape:cy="26.096866"
+     inkscape:window-width="2560"
+     inkscape:window-height="1369"
+     inkscape:window-x="-8"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg930" />
+  <rect
+     width="120"
+     height="120"
+     fill="#1f1d2e"
+     id="rect922" />
+  <g
+     id="g1311"
+     transform="translate(-1.7911985,2.843744)">
+    <path
+       d="M 11.054666,79.359383 C 23.836285,58.559618 55.031233,45.036481 84.454543,47.540237"
+       fill="none"
+       stroke="#ebbcba"
+       stroke-width="2"
+       id="path928" />
+    <path
+       d="M 11.996279,64.703404 C 28.141324,46.391181 61.187044,38.392405 89.750913,45.882754"
+       fill="none"
+       stroke="#ebbcba"
+       stroke-width="2"
+       id="path1053"
+       style="font-variation-settings:normal;opacity:1;vector-effect:none;fill:none;fill-opacity:1;stroke:#c4a7e7;stroke-width:2;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;-inkscape-stroke:none;stop-color:#000000;stop-opacity:1" />
+    <path
+       d="M 33.743019,40.985828 C 55.672516,30.257494 89.261015,35.531276 112.77479,53.394725"
+       fill="none"
+       stroke="#ebbcba"
+       stroke-width="2"
+       id="path1055"
+       style="font-variation-settings:normal;opacity:1;vector-effect:none;fill:none;fill-opacity:1;stroke:#9ccfd8;stroke-width:2;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;-inkscape-stroke:none;stop-color:#000000;stop-opacity:1" />
+  </g>
+</svg>
