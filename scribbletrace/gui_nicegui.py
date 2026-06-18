@@ -680,12 +680,12 @@ PREVIEW_CONTAINER_SIZES = {
     "X-Large": 900,
 }
 UI_STEP_LABELS = ["1. Image Processing", "2. Vector Generation"]
-DEFAULT_PREVIEW_WIDTH = "w-[420px]"
-PREVIEW_WIDTH_CLASSES = {
-    "Small": "w-[320px]",
-    "Medium": "w-[420px]",
-    "Large": "w-[560px]",
+PREVIEW_WIDTH_PX = {
+    "Small": 320,
+    "Medium": 420,
+    "Large": 560,
 }
+DEFAULT_PREVIEW_WIDTH_PX = 420
 ALGORITHM_THUMB_DIR = Path(__file__).parent / "assets" / "algorithm_thumbs"
 ALGORITHM_ORDER = ["spirals", "circles", "squares", "lines", "curves", "hatching"]
 PAPER_SIZES_MM = {
@@ -1256,7 +1256,7 @@ def create_gui() -> None:
 
     def _apply_preview_size() -> None:
         size = str(_safe_value(controls.get("preview_size", _ValueProxy("Medium"))))
-        width_class = PREVIEW_WIDTH_CLASSES.get(size, DEFAULT_PREVIEW_WIDTH)
+        width_px = PREVIEW_WIDTH_PX.get(size, DEFAULT_PREVIEW_WIDTH_PX)
         preview_keys = [
             "preview_grayscale",
             "preview_hist_downsampled",
@@ -1265,7 +1265,7 @@ def create_gui() -> None:
         ]
         for key in preview_keys:
             if key in outputs:
-                outputs[key].classes(remove="w-[320px] w-[420px] w-[560px]", add=width_class)
+                outputs[key].style(f"width: {width_px}px")
 
     def _update_svg_preview_html() -> None:
         # Get preview container size
@@ -1978,7 +1978,7 @@ def create_gui() -> None:
             tab_processing = ui.tab("Proc").props("icon=tune")
             tab_vector = ui.tab("Vector").props("icon=gesture")
 
-        with ui.tab_panels(tabs, value=tab_processing).props("vertical animated transition-prev=fade transition-next=fade").classes("flex-1 min-w-0"):
+        with ui.tab_panels(tabs, value=tab_input).props("vertical animated transition-prev=fade transition-next=fade").classes("flex-1 min-w-0"):
             with ui.tab_panel(tab_input):
                 with ui.column().classes("w-full max-w-[720px] gap-4"):
                     outputs["input_name"] = ui.label("Input: default").classes("st-title")
@@ -1995,10 +1995,14 @@ def create_gui() -> None:
                         label="Add images"
                     ).classes("max-w-[200px]").props('accept="image/*" flat')
 
-                    # Presets
-                    with ui.row().classes("w-full gap-2 items-center"):
-                        ui.button("Save Preset", icon="save", on_click=download_settings).props("flat")
-                        ui.upload(on_upload=on_load_preset, auto_upload=True, label="Load Preset").props('accept=".json" flat').classes("max-w-[200px]")
+                    # Settings
+                    ui.upload(on_upload=on_load_preset, auto_upload=True, label="Load Settings").props('accept=".json" flat').classes("max-w-[200px]")
+                    
+                    # Proceed button
+                    ui.button(
+                        "Proceed to Processing →",
+                        on_click=lambda: tabs.set_value(tab_processing)
+                    ).classes("mt-4").props("size=lg color=primary")
 
             with ui.tab_panel(tab_processing):
                 with ui.column().classes("w-full gap-3"):
@@ -2067,20 +2071,20 @@ def create_gui() -> None:
                     with ui.row().classes("w-full gap-4 flex-wrap"):
                         with ui.column().classes("gap-1"):
                             ui.label("1) Grayscale").classes("st-muted")
-                            outputs["preview_grayscale"] = ui.image().classes(f"{DEFAULT_PREVIEW_WIDTH} max-w-full st-card")
+                            outputs["preview_grayscale"] = ui.image().classes("max-w-full st-card").style(f"width: {DEFAULT_PREVIEW_WIDTH_PX}px")
                         with ui.column().classes("gap-1"):
                             ui.label("2) Histogram Transformed + Downsampled").classes("st-muted")
                             outputs["preview_hist_downsampled"] = ui.image().classes(
-                                f"{DEFAULT_PREVIEW_WIDTH} max-w-full st-card"
-                            )
+                                "max-w-full st-card"
+                            ).style(f"width: {DEFAULT_PREVIEW_WIDTH_PX}px")
                         with ui.column().classes("gap-1"):
                             ui.label("3) Inverted + Levels").classes("st-muted")
                             outputs["preview_invert_levels"] = ui.image().classes(
-                                f"{DEFAULT_PREVIEW_WIDTH} max-w-full st-card"
-                            )
+                                "max-w-full st-card"
+                            ).style(f"width: {DEFAULT_PREVIEW_WIDTH_PX}px")
                         with ui.column().classes("gap-1"):
                             ui.label("4) Gradient Magnitude").classes("st-muted")
-                            outputs["preview_gradmag"] = ui.image().classes(f"{DEFAULT_PREVIEW_WIDTH} max-w-full st-card")
+                            outputs["preview_gradmag"] = ui.image().classes("max-w-full st-card").style(f"width: {DEFAULT_PREVIEW_WIDTH_PX}px")
 
                     _apply_preview_size()
 
