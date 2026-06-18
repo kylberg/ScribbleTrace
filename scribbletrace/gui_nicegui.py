@@ -1255,7 +1255,7 @@ def create_gui() -> None:
         _update_orientation_tile_styles()
 
     def _apply_preview_size() -> None:
-        size = str(_safe_value(controls.get("preview_size", _ValueProxy("Medium"))))
+        size = str(_safe_value(controls.get("proc_preview_size", _ValueProxy("Medium"))))
         width_px = PREVIEW_WIDTH_PX.get(size, DEFAULT_PREVIEW_WIDTH_PX)
         preview_keys = [
             "preview_grayscale",
@@ -1265,7 +1265,10 @@ def create_gui() -> None:
         ]
         for key in preview_keys:
             if key in outputs:
-                outputs[key].style(f"width: {width_px}px")
+                el = outputs[key]
+                el._style.clear()
+                el._style["width"] = f"{width_px}px"
+                el.update()
 
     def _update_svg_preview_html() -> None:
         # Get preview container size
@@ -1995,14 +1998,8 @@ def create_gui() -> None:
                         label="Add images"
                     ).classes("max-w-[200px]").props('accept="image/*" flat')
 
-                    # Settings
-                    ui.upload(on_upload=on_load_preset, auto_upload=True, label="Load Settings").props('accept=".json" flat').classes("max-w-[200px]")
-                    
-                    # Proceed button
-                    ui.button(
-                        "Proceed to Processing →",
-                        on_click=lambda: tabs.set_value(tab_processing)
-                    ).classes("mt-4").props("size=lg color=primary")
+                    # Optional settings
+                    ui.upload(on_upload=on_load_preset, auto_upload=True, label="Load custom settings").props('accept=".json" flat').classes("max-w-[220px]")
 
             with ui.tab_panel(tab_processing):
                 with ui.column().classes("w-full gap-3"):
@@ -2010,13 +2007,6 @@ def create_gui() -> None:
                     controls["hist_min"] = _ValueProxy(0.0)
                     controls["hist_mid"] = _ValueProxy(0.5)
                     controls["hist_max"] = _ValueProxy(1.0)
-
-                    with ui.row().classes("w-full items-center gap-4"):
-                        ui.label("Preview Size").classes("st-muted")
-                        controls["preview_size"] = ui.toggle(["Small", "Medium", "Large"], value="Medium").props(
-                            "dense"
-                        )
-                        controls["preview_size"].on_value_change(lambda _: _apply_preview_size())
 
                     with ui.row().classes("w-full gap-6 items-start flex-wrap"):
                         with ui.column().classes("min-w-[320px] max-w-[640px] gap-2"):
@@ -2052,7 +2042,7 @@ def create_gui() -> None:
                         with ui.column().classes("min-w-[280px] max-w-[420px] gap-2"):
                             ui.label("Image Processing Settings").classes("st-title")
                             controls["output_width"] = _slider_with_readout(
-                                label="Output Width", min_v=10, max_v=200, value=40, step=1
+                                label="Output Width", min_v=3, max_v=200, value=40, step=1
                             )
                             controls["output_width"].on_value_change(lambda _: asyncio.create_task(run_to_stage(1)))
                             controls["levels"] = _slider_with_readout(
@@ -2067,7 +2057,13 @@ def create_gui() -> None:
                             controls["gradient_sigma"].on_value_change(lambda _: asyncio.create_task(run_to_stage(1)))
 
                     ui.separator()
-                    ui.label("Image Processing Previews").classes("st-title")
+                    with ui.row().classes("w-full items-center gap-4"):
+                        ui.label("Image Processing Previews").classes("st-title")
+                        ui.label("Size:").classes("st-muted ml-4")
+                        controls["proc_preview_size"] = ui.toggle(["Small", "Medium", "Large"], value="Medium").props(
+                            "dense"
+                        )
+                        controls["proc_preview_size"].on_value_change(lambda _: _apply_preview_size())
                     with ui.row().classes("w-full gap-4 flex-wrap"):
                         with ui.column().classes("gap-1"):
                             ui.label("1) Grayscale").classes("st-muted")
@@ -2300,7 +2296,7 @@ def create_gui() -> None:
                     with ui.row().classes("w-full items-center gap-2"):
                         ui.label("Zoom").classes("st-muted")
                         controls["svg_zoom"] = ui.toggle(
-                            ["Fit", "25%", "50%", "75%", "100%", "200%", "400%"],
+                            ["Fit", "25%", "50%", "75%", "100%", "200%", "400%", "800%"],
                             value="Fit"
                         ).props("dense")
                         controls["svg_zoom"].on_value_change(lambda _: _update_svg_preview_html())
