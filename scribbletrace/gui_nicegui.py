@@ -530,9 +530,10 @@ def run_pipeline_to_stage(
             hatch_diag_left,
             min_spacing,
         )
+        complexity_text = str(estimated_vertices)  # Store estimated vertices for stats
 
         if enable_vertex_guard and estimated_vertices > int(max_estimated_vertices):
-            status = f"Skipped: {estimated_vertices:,} vertices > {int(max_estimated_vertices):,} limit"
+            status = f"blocked:{estimated_vertices}:{int(max_estimated_vertices)}"
             return (
                 None,
                 "",
@@ -659,6 +660,7 @@ class NiceGuiState:
     hist_source_width: int = 720
     using_default_input: bool = True
     is_processing: bool = False
+    generation_id: int = 0  # Increments on each generation, used for cancellation
     # Uploaded images library: {name: np.ndarray}
     uploaded_images: dict[str, np.ndarray] = field(default_factory=dict)
     # Backdrop images for preview overlay (all at processed resolution)
@@ -669,6 +671,10 @@ class NiceGuiState:
     # Processed image dimensions for SVG alignment
     processed_width: int = 0
     processed_height: int = 0
+    # SVG generation stats
+    svg_path_count: int = 0
+    svg_vertex_count: int = 0
+    svg_generation_blocked: str = ""  # Empty if not blocked, otherwise reason
 
 
 HIST_WIDTH = 480
@@ -1284,13 +1290,29 @@ def create_gui() -> None:
                 '<div style="font-size:14px; color:#908caa;">Processing your image (1-15 seconds)</div>'
                 '</div>'
             )
+            if "svg_stats" in outputs:
+                outputs["svg_stats"].set_text("")
             return
 
         svg_code = state.latest_svg_content or ""
         if not svg_code.strip():
-            outputs["svg_preview_html"].set_content(
-                f'<div class="st-card" style="width:{container_size}px; height:{container_size}px; padding:12px; color:#908caa; display:flex; align-items:center; justify-content:center;">No SVG generated yet.</div>'
-            )
+            # Show blocked message if generation was blocked
+            if state.svg_generation_blocked:
+                outputs["svg_preview_html"].set_content(
+                    f'<div class="st-card" style="width:{container_size}px; height:{container_size}px; padding:12px; color:#f6c177; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px;">'
+                    '<div style="font-size:32px;">⚠️</div>'
+                    f'<div style="text-align:center;">{state.svg_generation_blocked}</div>'
+                    '<div style="font-size:12px; color:#908caa;">Reduce output width or disable vertex guard</div>'
+                    '</div>'
+                )
+                if "svg_stats" in outputs:
+                    outputs["svg_stats"].set_text(f"⚠️ {state.svg_generation_blocked}")
+            else:
+                outputs["svg_preview_html"].set_content(
+                    f'<div class="st-card" style="width:{container_size}px; height:{container_size}px; padding:12px; color:#908caa; display:flex; align-items:center; justify-content:center;">No SVG generated yet.</div>'
+                )
+                if "svg_stats" in outputs:
+                    outputs["svg_stats"].set_text("")
             return
 
         # Get backdrop preference
@@ -1456,6 +1478,17 @@ def create_gui() -> None:
                 ]
             )
         )
+        
+        # Update stats display
+        if "svg_stats" in outputs:
+            if state.svg_generation_blocked:
+                outputs["svg_stats"].set_text(f"⚠️ {state.svg_generation_blocked}")
+            elif state.svg_path_count > 0 or state.svg_vertex_count > 0:
+                outputs["svg_stats"].set_text(
+                    f"Paths: {state.svg_path_count:,}  |  Estimated vertices: {state.svg_vertex_count:,}"
+                )
+            else:
+                outputs["svg_stats"].set_text("")
 
     def _slider_with_readout(
         *,
@@ -1606,13 +1639,77 @@ def create_gui() -> None:
                                 "flat dense round size=xs"
                             ).classes("text-xs")
 
+    def cancel_generation() -> None:
+        """Cancel the current generation by incrementing the generation ID."""
+        state.generation_id += 1
+        state.is_processing = False
+        outputs["gen_vectors_spinner"].set_visibility(False)
+        outputs["gen_vectors_status"].set_visibility(False)
+        outputs["cancel_btn"].set_visibility(False)
+        outputs["gen_vectors_btn"].enabled = True
+        _update_svg_preview_html()
+        ui.notify("Generation cancelled", type="info", position="top", timeout=2000)
+
     async def run_to_stage(stage_index: int) -> None:
+        state.generation_id += 1
+        current_gen_id = state.generation_id
         state.is_processing = True
         outputs["gen_vectors_spinner"].set_visibility(True)
         outputs["gen_vectors_status"].set_visibility(True)
+        outputs["cancel_btn"].set_visibility(True)
         outputs["gen_vectors_btn"].enabled = False
         _update_svg_preview_html()  # Show processing message immediately
         await asyncio.sleep(0)  # Yield to allow UI to update
+        
+        # Check if cancelled before starting heavy computation
+        if state.generation_id != current_gen_id:
+            return
+        
+        # Run pipeline in thread pool to keep UI responsive during computation
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: run_pipeline_to_stage(
+                state.pipeline_cache,
+                state.input_image,
+                stage_index,
+                str(_safe_value(controls["algorithm"])),
+                str(_safe_value(controls["color_theme"])),
+                float(_safe_value(controls["hist_min"])),
+                float(_safe_value(controls["hist_mid"])),
+                float(_safe_value(controls["hist_max"])),
+                float(_safe_value(controls["output_width"])),
+                int(_safe_value(controls["levels"])),
+                bool(_safe_value(controls["invert"])),
+                float(_safe_value(controls["gradient_sigma"])),
+                float(_safe_value(controls["stroke_width"])),
+                float(_safe_value(controls["randomness_vertex"])),
+                float(_safe_value(controls["randomness_position"])),
+                int(_safe_value(controls["theta_resolution"])),
+                float(_safe_value(controls["spiral_b"])),
+                bool(_safe_value(controls["connect_cells"])),
+                int(_safe_value(controls["circle_points"])),
+                bool(_safe_value(controls["small_first"])),
+                bool(_safe_value(controls["hatch_horizontal"])),
+                bool(_safe_value(controls["hatch_vertical"])),
+                bool(_safe_value(controls["hatch_diag_right"])),
+                bool(_safe_value(controls["hatch_diag_left"])),
+                float(_safe_value(controls["min_spacing"])),
+                float(_safe_value(controls["max_spacing"])),
+                float(_safe_value(controls["lines_segment_length"])),
+                float(_safe_value(controls["randomness_length"])),
+                float(_safe_value(controls["min_gradient_scale"])),
+                float(_safe_value(controls["max_gradient_scale"])),
+                float(_safe_value(controls["curves_segment_length"])),
+                float(_safe_value(controls["curves_randomness_length"])),
+                int(_safe_value(controls["max_steps"])),
+                float(_safe_value(controls["step_size"])),
+                int(_safe_value(controls["bezier_samples"])),
+                bool(_safe_value(controls["enable_vertex_guard"])),
+                float(_safe_value(controls["max_estimated_vertices"])),
+            )
+        )
+        
         (
             svg_preview,
             svg_code,
@@ -1625,45 +1722,11 @@ def create_gui() -> None:
             complexity_text,
             status_text,
             cache,
-        ) = run_pipeline_to_stage(
-            state.pipeline_cache,
-            state.input_image,
-            stage_index,
-            str(_safe_value(controls["algorithm"])),
-            str(_safe_value(controls["color_theme"])),
-            float(_safe_value(controls["hist_min"])),
-            float(_safe_value(controls["hist_mid"])),
-            float(_safe_value(controls["hist_max"])),
-            float(_safe_value(controls["output_width"])),
-            int(_safe_value(controls["levels"])),
-            bool(_safe_value(controls["invert"])),
-            float(_safe_value(controls["gradient_sigma"])),
-            float(_safe_value(controls["stroke_width"])),
-            float(_safe_value(controls["randomness_vertex"])),
-            float(_safe_value(controls["randomness_position"])),
-            int(_safe_value(controls["theta_resolution"])),
-            float(_safe_value(controls["spiral_b"])),
-            bool(_safe_value(controls["connect_cells"])),
-            int(_safe_value(controls["circle_points"])),
-            bool(_safe_value(controls["small_first"])),
-            bool(_safe_value(controls["hatch_horizontal"])),
-            bool(_safe_value(controls["hatch_vertical"])),
-            bool(_safe_value(controls["hatch_diag_right"])),
-            bool(_safe_value(controls["hatch_diag_left"])),
-            float(_safe_value(controls["min_spacing"])),
-            float(_safe_value(controls["max_spacing"])),
-            float(_safe_value(controls["lines_segment_length"])),
-            float(_safe_value(controls["randomness_length"])),
-            float(_safe_value(controls["min_gradient_scale"])),
-            float(_safe_value(controls["max_gradient_scale"])),
-            float(_safe_value(controls["curves_segment_length"])),
-            float(_safe_value(controls["curves_randomness_length"])),
-            int(_safe_value(controls["max_steps"])),
-            float(_safe_value(controls["step_size"])),
-            int(_safe_value(controls["bezier_samples"])),
-            bool(_safe_value(controls["enable_vertex_guard"])),
-            float(_safe_value(controls["max_estimated_vertices"])),
-        )
+        ) = result
+
+        # Check if cancelled during computation
+        if state.generation_id != current_gen_id:
+            return
 
         state.pipeline_cache = cache
         state.latest_svg_content = svg_code
@@ -1771,11 +1834,38 @@ def create_gui() -> None:
         settings_snapshot = _build_settings_snapshot(controls)
         outputs["settings_source"].set_content(json.dumps(settings_snapshot, indent=2))
 
+        # Update SVG stats
+        if status_text.startswith("blocked:"):
+            # Vertex guard blocked generation
+            parts = status_text.split(":")
+            estimated = int(parts[1]) if len(parts) > 1 else 0
+            limit = int(parts[2]) if len(parts) > 2 else 0
+            state.svg_generation_blocked = f"Blocked: {estimated:,} vertices exceeds {limit:,} limit"
+            state.svg_vertex_count = estimated
+            state.svg_path_count = 0
+            ui.notify(
+                f"Generation blocked: {estimated:,} estimated vertices exceeds {limit:,} limit. "
+                "Reduce output width or adjust algorithm settings.",
+                type="warning",
+                position="top",
+                timeout=8000,
+            )
+        else:
+            state.svg_generation_blocked = ""
+            # Count paths in SVG
+            state.svg_path_count = svg_code.count("<path") if svg_code else 0
+            # Get estimated vertices from complexity_text
+            try:
+                state.svg_vertex_count = int(complexity_text) if complexity_text else 0
+            except ValueError:
+                state.svg_vertex_count = 0
+
         # Mark processing complete BEFORE updating preview so it shows the SVG, not "Processing..."
         state.current_stage = max(0, min(stage_index, len(PIPELINE_STEP_LABELS) - 1))
         state.is_processing = False
         outputs["gen_vectors_spinner"].set_visibility(False)
         outputs["gen_vectors_status"].set_visibility(False)
+        outputs["cancel_btn"].set_visibility(False)
         outputs["gen_vectors_btn"].enabled = True
         _update_svg_preview_html()
 
@@ -2290,6 +2380,9 @@ def create_gui() -> None:
                         outputs["gen_vectors_btn"] = ui.button(
                             "Generate Vectors", on_click=lambda: asyncio.create_task(run_to_stage(2))
                         ).classes("grow")
+                        outputs["cancel_btn"] = ui.button(
+                            "Cancel", icon="close", on_click=lambda: cancel_generation()
+                        ).props("flat color=negative").set_visibility(False)
                         with ui.row().classes("items-center gap-2"):
                             outputs["gen_vectors_spinner"] = ui.spinner(size="xl").set_visibility(False)
                             outputs["gen_vectors_status"] = ui.label("Processing...").classes("st-muted").set_visibility(False)
@@ -2397,6 +2490,7 @@ def create_gui() -> None:
                             ).on("click", lambda _, n=name: _set_stroke_color(n))
                     
                     outputs["svg_preview_html"] = ui.html().classes("w-full")
+                    outputs["svg_stats"] = ui.label("").classes("st-muted text-sm")
 
                     with ui.row().classes("w-full gap-2"):
                         ui.button("Download SVG", icon="download", on_click=download_svg).props(
